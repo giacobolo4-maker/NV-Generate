@@ -1,274 +1,285 @@
-# Studio approfondito di NV-Generate-CTMR e MAISI-v2
+# Guida allo studio di NV-Generate-CTMR e MAISI-v2
 
-Documento di studio personale, pensato per essere letto con calma, anche da un altro computer.
+Questo documento spiega il progetto in modo semplice, ma con tutti i dettagli. Ogni termine tecnico viene spiegato la prima volta che compare, con parole comuni. Per ogni file del codice trovi: a che cosa serve, come si usa, che cosa legge e che cosa scrive.
 
-Fonti usate:
-- Paper: *MAISI-v2: Accelerated 3D High-Resolution Medical Image Synthesis with Rectified Flow and Region-specific Contrastive Loss*, Zhao et al., arXiv:2508.05772v2 (16 nov 2025). Letto dal PDF `MAISI-v2.pdf`.
-- Blog NVIDIA: *Synthesize Realistic 3D Medical Images at Scale to Ship Pre-Trained Models*, 22 maggio 2026. Letto come riassunto da una pagina web, quindi alcuni dettagli sono parafrasati.
-- Codice: lettura statica dei file della repo. **Il codice non è stato eseguito**: non ho GPU né i pesi. Tutto ciò che è marcato come "non verificato" va provato in esecuzione.
+**Da dove vengono le informazioni**
+- Il **paper** MAISI-v2 (arXiv 2508.05772, Zhao et al., NVIDIA, NIH, Oxford, UAMS), letto dal PDF.
+- Il **blog** di NVIDIA del 22 maggio 2026, letto come riassunto da una pagina web. Alcuni dettagli sono parafrasati.
+- Il **codice**, letto riga per riga da un agente e controllato, ma **non eseguito**: non ci sono GPU né pesi dei modelli nel mio ambiente. Quello che è marcato "da verificare" va provato sul tuo computer.
 
-Indice:
-1. [Il quadro generale](#1-il-quadro-generale)
-2. [Concetti di base](#2-concetti-di-base)
-3. [Il paper MAISI-v2 in dettaglio](#3-il-paper-maisi-v2-in-dettaglio)
-4. [Il blog NVIDIA e la famiglia di modelli](#4-il-blog-nvidia-e-la-famiglia-di-modelli)
-5. [Architettura del codice](#5-architettura-del-codice)
-6. [Mappa dei file di scripts/](#6-mappa-dei-file-di-scripts)
-7. [Configurazioni](#7-configurazioni)
-8. [Dizionari delle etichette](#8-dizionari-delle-etichette)
-9. [Flussi end-to-end](#9-flussi-end-to-end)
-10. [Come usarlo in pratica](#10-come-usarlo-in-pratica)
-11. [Bug, rischi e punti da verificare](#11-bug-rischi-e-punti-da-verificare)
-12. [Documentazione e codice non coincidono](#12-documentazione-e-codice-non-coincidono)
-13. [Cosa significa tutto questo per il tuo progetto](#13-cosa-significa-tutto-questo-per-il-tuo-progetto)
+**Come leggere le sigle**
+- **TC**: tomografia computerizzata, in inglese CT. Immagini a raggi X in 3D.
+- **MRI** o **risonanza**: immagini magnetiche in 3D.
+- **GPU**: la scheda grafica, che fa i calcoli pesanti.
+- **File JSON**: file di testo con impostazioni, scritti in un formato ordinato con chiavi e valori.
+- **NIfTI** (`.nii.gz`): il formato standard dei volumi medici.
+
+---
+
+## Indice
+
+1. [Di che cosa parla il progetto](#1-di-che-cosa-parla-il-progetto)
+2. [Parole chiave](#2-parole-chiave)
+3. [Il paper MAISI-v2, spiegato passo per passo](#3-il-paper-maisi-v2-spiegato-passo-per-passo)
+4. [Il blog NVIDIA e i modelli disponibili](#4-il-blog-nvidia-e-i-modelli-disponibili)
+5. [Come è organizzato il codice](#5-come-è-organizzato-il-codice)
+6. [A cosa serve ogni file](#6-a-cosa-serve-ogni-file)
+7. [I file di configurazione](#7-i-file-di-configurazione)
+8. [Le etichette delle strutture](#8-le-etichette-delle-strutture)
+9. [Il percorso di un'immagine, passo per passo](#9-il-percorso-di-unimmagine-passo-per-passo)
+10. [Come si usa in pratica](#10-come-si-usa-in-pratica)
+11. [Problemi noti](#11-problemi-noti)
+12. [Dove la documentazione non corrisponde al codice](#12-dove-la-documentazione-non-corrisponde-al-codice)
+13. [Che cosa significa per il tuo progetto](#13-che-cosa-significa-per-il-tuo-progetto)
 14. [Glossario](#14-glossario)
 
 ---
 
-## 1. Il quadro generale
+## 1. Di che cosa parla il progetto
 
-Il progetto è composto da due livelli:
+Il progetto crea **immagini mediche finte ma realistiche**. Le crea in 3D, cioè come un blocco di volume e non come una foto piatta.
 
-- **MAISI-v2** (paper): un framework per generare volumi 3D di immagini mediche (CT e, nelle versioni successive, MRI) insieme alla loro segmentazione, cioè una mappa in cui ogni voxel è etichettato con la struttura anatomica a cui appartiene.
-- **NV-Generate-CTMR** (repo): l'implementazione open source di MAISI-v2 e delle sue varianti, con pesi pre-addestrati, script di inferenza, di training e di preparazione dati.
+Ogni immagine viene creata insieme a una **mappa delle strutture** (in inglese *mask* o *label map*). La mappa dice, per ogni piccolo punto del volume, che cosa c'è: fegato, osso, tumore, aria, e così via.
 
-L'idea centrale è questa: invece di generare solo immagini, il modello genera **coppie immagine + maschera**. Questo è utile perché la maschera è già la "verità" per addestrare altri modelli di segmentazione, e l'immagine è realistica perché condizionata dalla maschera.
+Perché serve? Per addestrare altri programmi che riconoscono le strutture (chiamati modelli di **segmentazione**). Con dati reali servono molte autorizzazioni e molto tempo di lavoro di medici. Con dati finti ma realistici si può aumentare la quantità di dati disponibili.
 
-Ci sono due modi principali di usare il sistema:
+Ci sono due modi principali di usarlo:
 
-1. **Da zero, con la maschera generata**: il modello di maschere crea una nuova anatomia (Path A), poi il modello di immagini genera il volume corrispondente.
-2. **Da una maschera reale**: si pesca una maschera di training, la si modifica con augmentation, poi il modello di immagini genera l'immagine (Path B).
+1. **Creare tutto da zero**: il programma inventa una mappa delle strutture e poi crea l'immagine che corrisponde.
+2. **Partire da una mappa che hai già**: per esempio la tua segmentazione di un tumore. Il programma crea l'immagine che corrisponde a quella mappa. È il modo più vicino al tuo lavoro.
 
-E c'è un terzo uso: **dato una maschera che hai già** (per esempio la tua segmentazione di un tumore), generare l'immagine corrispondente. Questo è il caso `infer_image_from_mask`, probabilmente quello più vicino al tuo lavoro.
-
----
-
-## 2. Concetti di base
-
-Questa sezione serve a leggere il resto senza fermarsi ai termini.
-
-### 2.1 Modelli di diffusione
-
-Un modello di diffusione impara a generare dati partendo dal rumore. In addestramento si prende un'immagine reale, le si aggiunge rumore in più passi, e la rete impara a **togliere** il rumore. In inferenza si parte da rumore puro e la rete lo trasforma passo dopo passo in un'immagine.
-
-Il problema è che servono centinaia di passi (tipicamente 1000 con DDPM), e in 3D ogni passo è costoso.
-
-### 2.2 DDPM e rectified flow
-
-- **DDPM** (Denoising Diffusion Probabilistic Models): il processo di rumore è stocastico, e in inferenza si fanno tipicamente 1000 passi. Nel codice è la variante `ddpm-ct`.
-- **Rectified flow** (RFlow): invece di un processo stocastico, si impara un campo di velocità che trasporta il rumore verso l'immagine lungo una traiettoria il più possibile **dritta**. Traiettorie dritte si possono percorrere con meno passi. Nel paper si usano 30 passi. Nel codice è la variante `rflow-*`.
-
-Formula chiave del paper (eq. 3): si addestra una rete `v_t(x_t, c)` a predire la velocità `x1 − x0`, dove `x_t = (1−t)·x0 + t·x1`. Qui `x0` è rumore, `x1` è l'immagine reale latente, `c` è la condizione (la maschera).
-
-### 2.3 Spazio latente e VAE
-
-Un volume 3D di 512×512×768 voxel è troppo grande per una diffusione diretta. Quindi si usa un **autoencoder variazionale (VAE)**: comprime il volume in uno spazio latente più piccolo e poi lo ricostruisce.
-
-Nel paper: compressione 4×4×4 per asse (64 volte in volume), con 4 canali latenti invece di 1 canale dell'immagine. Il paper lo chiama tasso di compressione 16. La diffusione avviene nello spazio latente (**LDM**, Latent Diffusion Model), poi il decoder riporta tutto all'immagine.
-
-Nel codice l'autoencoder dell'immagine è `AutoencoderKlMaisi` con canali `[64,128,256]`, e produce 4 canali latenti (vedi [sezione 7.1](#71-architettura-di-rete-config_network_rflowjson)).
-
-### 2.4 ControlNet
-
-ControlNet è una rete ausiliaria che legge la condizione (la maschera) e inietta informazioni nel modello di diffusione principale, che resta **congelato**. In questo modo si addestra solo il ControlNet, con meno memoria e meno dati. L'output del ControlNet sono "residui" che si sommano alle feature intermedie della UNet.
-
-### 2.5 Classifier-free guidance (CFG)
-
-Durante il training, una parte delle volte la condizione viene sostituita con un valore "nullo". In inferenza si calcolano due predizioni, con e senza condizione, e si combinano:
-
-`output = uncond + s · (cond − uncond)`
-
-Con `s` alto l'output segue di più la condizione, ma può diventare meno realistico. Nel codice `cfg_guidance_scale` e `mask_generation_cfg_guidance_scale` controllano `s`.
-
-### 2.6 Maschere, etichette, dizionari
-
-Una maschera di segmentazione è un volume dove ogni voxel contiene un intero: 0 per lo sfondo, 1 per il fegato, 23 per il tumore polmonare, e così via. Il dizionario delle etichette associa nome e numero. Il modello è addestrato con una lista fissa di classi, quindi **il numero di una struttura conta**: un'etichetta diversa significa un'altra struttura per il modello.
-
-### 2.7 FOV (campo di vista)
-
-FOV = `output_size × spacing`: il numero di voxel per la spaziatura in mm dà la dimensione fisica del volume. Il paper e la documentazione dicono che il FOV è il parametro che più incide sulla qualità: un FOV fuori distribuzione dà risultati inutilizzabili, anche se il codice accetta l'input.
-
-### 2.8 FID
-
-*Fréchet Inception Distance*: misura quanto la distribuzione delle immagini generate somiglia a quella di immagini reali. Più basso è meglio. Nel paper si calcola in 2D su tre piani (xy, yz, xz) e si fa la media. È una misura di realismo, non di correttezza clinica.
-
-### 2.9 Dice
-
-Misura la sovrapposizione tra due maschere, da 0 a 1. Nel paper è la metrica di segmentazione usata per valutare se i dati sintetici aiutano un modello a segmentare meglio.
+Un terzo modo è creare solo l'immagine, senza mappa. Ma in questo caso non controlli dove si trovano le strutture.
 
 ---
 
-## 3. Il paper MAISI-v2 in dettaglio
+## 2. Parole chiave
 
-### 3.1 Il problema
+Queste sono le parole che compaiono più spesso nel resto del documento.
 
-Il paper identifica tre limiti dei modelli di sintesi 3D basati su diffusione:
+- **Modello di diffusione**: un programma che impara a creare un'immagine partendo dal rumore, cioè da una confusione casuale. Funziona come una foto che si mette a fuoco passo dopo passo. Ogni passo è un calcolo. Più passi significa più tempo.
 
-1. **Generalizzabilità**: molti modelli funzionano solo per un organo, una modalità o una spaziatura di voxel. I dati clinici variano molto.
-2. **Velocità**: la diffusione richiede molti passi. Generare 512×512×512 può richiedere più di 10 minuti con i metodi precedenti.
-3. **Fedeltà alla condizione**: il volume generato non segue sempre la maschera. Per le immagini mediche è un problema critico, perché un tumore fuori posto rende il dato inutile.
+- **Rectified flow**: una variante più veloce della diffusione. Invece di fare un percorso tortuoso dal rumore all'immagine, lo fa in linea più dritta. Una linea dritta si percorre con meno passi. Nel paper bastano 30 passi.
 
-MAISI (la versione precedente, Guo et al. 2025, WACV) risolve il primo problema, ma resta lento (1000 passi DDPM) e ha una fedeltà limitata.
+- **DDPM**: la variante classica della diffusione, con un processo casuale e tipicamente 1000 passi. È più lenta ma più "varia" nei risultati.
 
-### 3.2 Le tre contribuzioni dichiarate
+- **Spazio latente**: un modo compresso di rappresentare l'immagine. Invece di lavorare sui milioni di punti del volume, si lavora su una versione più piccola. Poi si decomprime per tornare all'immagine.
 
-1. **Primo modello rectified flow per la sintesi 3D medica**, integrato in un LDM. Dichiarano 33× di accelerazione mantenendo la qualità.
-2. **Perdita contrastiva specifica per regione** (region-specific contrastive loss): per migliorare la sensibilità a strutture piccole, come i tumori.
-3. **Codice, pesi, dettagli di training e una demo GUI**, pubblicati.
+- **VAE (autoencoder variazionale)**: la parte che comprime e decomprime. Fa da "traduttore" tra l'immagine e la sua versione compressa. Il nome *encoder* indica la compressione, *decoder* la decompressione.
 
-### 3.3 Architettura
+- **ControlNet**: un componente aggiuntivo che legge la mappa delle strutture e suggerisce al modello principale dove mettere ciascuna struttura. Il modello principale resta fermo, mentre si addestra solo il ControlNet.
 
-Il sistema è composto da tre parti:
+- **Maschera (mask)**: la mappa delle strutture. Ogni punto ha un numero intero. 0 è lo sfondo, 1 è il fegato, 23 è il tumore del polmone, e così via.
 
-| Componente | Ruolo | Note |
+- **Etichetta (label)**: il numero di una struttura. Il modello conosce solo una lista fissa di etichette. Se cambi il numero di una struttura, il modello la tratta come un'altra struttura.
+
+- **Spaziatura (spacing)**: quanti millimetri misura un punto (un *voxel*) del volume. Per esempio 1.5 × 1.5 × 2.0 mm significa che ogni punto è largo 1.5 mm, alto 1.5 mm e profondo 2 mm.
+
+- **Voxel**: un "pixel 3D", cioè un piccolo cubetto del volume.
+
+- **FOV (campo di vista)**: la dimensione reale del volume, cioè numero di voxel per spaziatura. Se il FOV è fuori dal normale, il risultato peggiora molto, anche se il programma accetta l'input.
+
+- **Classifier-free guidance (CFG)**: un trucco per far seguire di più la condizione al modello. Il modello fa due predizioni, una con la condizione e una senza, e poi amplifica la differenza. Un valore alto segue di più la condizione, ma può rendere l'immagine meno realistica.
+
+- **FID**: un punteggio che misura quanto le immagini sembrano reali, confrontando le distribuzioni statistiche. Più basso è meglio. Non dice nulla sulla correttezza medica.
+
+- **Dice**: un punteggio da 0 a 1 che misura quanto due maschere coincidono. 1 significa coincidenza perfetta. Più alto è meglio.
+
+- **Hounsfield (HU)**: la scala dei valori della TC. L'aria è circa −1000 HU, l'acqua 0, l'osso molto più alto.
+
+- **Modello di segmentazione**: un programma che, dato un'immagine, disegna da solo le strutture (per esempio il tumore). È quello che vuoi addestrare con i dati finti.
+
+---
+
+## 3. Il paper MAISI-v2, spiegato passo per passo
+
+### 3.1 Il problema che risolve
+
+Il paper parte da tre limiti dei modelli di sintesi 3D basati sulla diffusione:
+
+1. **Generalizzabilità**: molti modelli funzionano solo per un organo, una modalità o una spaziatura precisa. I dati reali invece variano molto: scanner diversi, protocolli diversi, risoluzioni diverse.
+2. **Velocità**: la diffusione richiede molti passi. In 3D, creare un volume 512×512×512 con i metodi precedenti può richiedere più di dieci minuti.
+3. **Fedeltà alla condizione**: il volume generato non sempre segue la maschera. Per le immagini mediche è un problema critico, perché un tumore nel posto sbagliato rende il dato inutile.
+
+Il predecessore, **MAISI** (Guo et al., 2025), risolve il primo problema, ma resta lento e ha poca fedeltà alla maschera.
+
+### 3.2 Le tre idee principali
+
+1. **Primo uso del rectified flow in 3D medico**. Il rectified flow sostituisce la diffusione stocastica con un percorso quasi dritto, che richiede meno passi. Gli autori dichiarano una **accelerazione di 33 volte**.
+
+2. **Perdita contrastiva specifica per regione** (region-specific contrastive loss). Una "perdita" (loss) è il numero che il programma cerca di far diminuire durante l'addestramento. Questa è una perdita pensata per i tumori piccoli. L'idea è spiegata in [sezione 3.4](#34-la-perdita-contrastiva-per-regione-spiegata-semplice).
+
+3. **Codice, pesi e dettagli di addestramento pubblicati**, insieme a una demo grafica.
+
+### 3.3 Come funziona il modello, pezzo per pezzo
+
+Il sistema ha tre parti, che lavorano in cascata:
+
+| Parte | Che cosa fa, in parole semplici | Note |
 |---|---|---|
-| **VAE** | Comprime il volume in latente 4×4×4 per asse, 4 canali | Riusato da MAISI senza nuovo training |
-| **LDM con rectified flow** | Genera il latente, condizionato dalla spaziatura dei voxel | Sostituisce il DDPM di MAISI |
-| **ControlNet** | Legge la maschera e guida la generazione | Include la perdita contrastiva |
+| **VAE** | Comprime il volume 3D in una versione piccola (spazio latente) e poi lo ricostruisce | Gli autori riusano il VAE di MAISI senza riaddestrarlo. Comprime 4×4×4 per asse con 4 canali |
+| **LDM con rectified flow** | Crea la versione compressa partendo dal rumore, guidato dalla spaziatura dei voxel | Sostituisce il DDPM di MAISI |
+| **ControlNet** | Legge la maschera e guida il modello principale | Qui si applica la perdita contrastiva |
 
-La spaziatura dei voxel è l'unica condizione "di sistema": viene letta automaticamente dall'header NIfTI, senza annotazione manuale. La maschera è la condizione semantica.
+La **spaziatura dei voxel** è una condizione "di sistema": il programma la legge automaticamente dall'intestazione del file NIfTI, senza che nessuno la scriva a mano. La **maschera** è la condizione semantica: dice che cosa va messo dove.
 
-### 3.4 La perdita contrastiva specifica per regione
+Il paper scrive la formula del rectified flow. In parole semplici: il modello impara una "velocità" che porta un punto dal rumore (`x0`) all'immagine reale (`x1`) lungo una linea dritta. Durante l'addestramento si confronta la velocità predetta con quella della linea dritta, e si corregge l'errore.
 
-Questa è l'idea più originale del paper. Il problema: con una sola perdita L1 pesata (il tumore pesa 100 volte di più), il tumore non appare sempre nel risultato.
+### 3.4 La perdita contrastiva per regione, spiegata semplice
 
-L'idea: generare **due** volumi dallo **stesso rumore**:
-- uno con la maschera originale `c_orig`;
-- uno con una maschera perturbata `c_perturb`, dove le etichette della regione d'interesse vengono sostituite con l'etichetta dello sfondo corrispondente. Ad esempio il tumore pancreatico diventa pancreas.
+**Il problema.** Anche con una penalità più alta sul tumore (il paper usa peso 100), il tumore a volte non compare nel risultato.
 
-Poi si impongono due condizioni:
+**L'idea.** Il programma crea **due** immagini a partire dallo **stesso rumore**:
+- una con la maschera originale (con il tumore);
+- una con una maschera "truccata", dove il tumore è sostituito dal tessuto normale. Per esempio, un tumore del pancreas diventa pancreas.
 
-- **ROI sensitivity** (`L_roi`): nella regione del tumore i due volumi devono **differire**, perché la condizione è cambiata. Si penalizza la differenza assoluta solo dove la maschera di ROI è attiva, con un limite superiore `δ = 2` per evitare esplosioni di gradiente.
-- **Background consistency** (`L_bg`): fuori dalla regione i due volumi devono **coincidere**, perché la condizione lì non è cambiata.
+Poi il programma impone due regole:
+- **Dentro la regione del tumore** (sensibilità alla regione, `L_roi`): le due immagini devono essere **diverse**, perché la condizione è cambiata. Si penalizza la somiglianza solo dove c'è il tumore.
+- **Fuori dalla regione** (coerenza di sfondo, `L_bg`): le due immagini devono essere **uguali**, perché fuori la condizione non è cambiata.
 
-La perdita totale è `L_total = L_flow + λ·(L_roi + L_bg)`, con `λ` il peso della perdita contrastiva.
+Il termine di ogni pezzo è misurato come differenza assoluta tra le due immagini, con un limite superiore (δ = 2) per evitare che il valore esploda. Senza questo limite, nel paper, l'addestramento diventa instabile e compaiono valori NaN (numeri non validi).
 
-Il paper nota anche un vincolo pratico: se `λ` è troppo grande, il resto del corpo viene generato male e il controllo di qualità sui valori HU fallisce. Il loro schema finale usa `λ = 0.01` per i primi 30 epoch (per far comparire i tumori) e poi `λ = 0.001` per i successivi 30 (per correggere il corpo).
+La perdita totale è la somma della perdita di flusso più il termine contrastivo moltiplicato per un peso `λ`.
 
-Per la memoria, quando il volume è grande calcolano la perdita sulle feature intermedie dell'encoder del ControlNet invece che sull'output finale. Le feature sono più grossolane, ma l'allenamento su volumi grandi diventa possibile.
+**Il problema del peso.** Se `λ` è troppo grande, il corpo intorno viene generato male, e il controllo di qualità sui valori HU non passa. Il paper usa:
+- `λ = 0.01` per i primi 30 epoch (per far comparire i tumori);
+- `λ = 0.001` per i 30 successivi (per correggere il resto del corpo).
 
-### 3.5 La strategia di training in tre stadi
+Un **epoch** è un giro completo sui dati di addestramento.
 
-Il training di MAISI-v2 è descritto così:
+Per le immagini molto grandi, la perdita viene calcolata su feature intermedie dell'encoder del ControlNet, invece che sull'output finale. Le feature sono più grossolane, ma così la memoria basta.
 
-| Stadio | Dati | Batch | Learning rate | Durata |
+### 3.5 L'addestramento in tre fasi
+
+Il modello non viene addestrato in un colpo solo. Il paper descrive tre fasi:
+
+| Fase | Quali dati | Dimensione del gruppo (batch) | Learning rate | Durata |
 |---|---|---|---|---|
-| 1. Pre-training | Tutti i volumi a 128³ (anche downsampled) | 96 | 1e-3 | 1 giorno |
-| 2. Main | Volumi a risoluzione piena, raggruppati per forma (bucketed) | 128³→96, 256×256×128→24, 512×512×768→1 | 1e-3, polinomiale | 16000 epoch, circa 10 giorni |
-| 3. Fine-tuning | Tutti i dati mescolati, pesi di campionamento per bilanciare i dataset | 1 | 1e-4 | 2000 epoch, circa 10 giorni |
+| 1. Pre-training | Tutti i volumi piccoli, 128×128×128 (anche ridotti) | 96 | 1e-3 | 1 giorno |
+| 2. Main | Volumi a risoluzione piena, raggruppati per forma | 128³: 96; 256×256×128: 24; 512×512×768: 1 | 1e-3, con decadimento | 16000 epoch, circa 10 giorni |
+| 3. Fine-tuning | Tutti i dati mescolati, con pesi per bilanciare i dataset | 1 | 1e-4 | 2000 epoch, circa 10 giorni |
 
-Ragioni dichiarate:
-- Lo stadio 1 accelera il training e **previene i NaN**, che compaiono con batch piccoli in mixed precision.
-- Lo stadio 2 usa "bucketing": ogni GPU riceve solo volumi della stessa forma, per poter usare batch più grandi.
-- Lo stadio 3 corregge lo squilibrio di dati introdotto dallo stadio 2.
+Il **learning rate** è la velocità con cui il modello cambia i suoi valori a ogni correzione: se è troppo alta il modello impazzisce, se è troppo bassa impara lentamente.
 
-Il training completo è su 64 A100 da 80 GB per circa tre settimane.
+Il **batch** è quanti esempi vengono elaborati insieme. Con immagini grandi il batch deve essere piccolo, perché la memoria non basta.
 
-Il **ControlNet** è addestrato separatamente: 8 A100, AdamW, lr 5e-5 con decadimento polinomiale, 60 epoch, circa 2 giorni. Le maschere di training sono **pseudo-etichette** prodotte da VISTA3D (He et al. 2024) su 127 strutture anatomiche e lesioni; dove esistono etichette manuali, le sostituiscono.
+Perché tre fasi:
+- La **fase 1** accelera tutto e previene i NaN, che compaiono con batch piccoli in precisione ridotta (*mixed precision*).
+- La **fase 2** usa il *bucketing*: ogni scheda grafica riceve solo volumi della stessa forma, così può usare batch più grandi.
+- La **fase 3** corregge lo squilibrio che la fase 2 ha lasciato: alcuni dataset erano più numerosi di altri.
 
-### 3.6 I dati
+Il training completo è stato fatto su **64 schede A100 da 80 GB**, per circa tre settimane.
 
-Il training dell'LDM usa circa **107.000 volumi derivati da 11.000 scansioni CT**. Le fonti sono molte e pubbliche (HNSCC, AbdomenCT-1K, AMOS22, MSD, TotalSegmentator, LIDC, NLST e altre) più due dataset interni: 237 CT di lesioni ossee e 1.386 CT di torace e addome.
+Il **ControlNet** è addestrato a parte: 8 schede A100, ottimizzatore AdamW, learning rate 5e-5 con decadimento polinomiale, 60 epoch, circa 2 giorni. Le maschere di addestramento sono **pseudo-etichette**: non sono state disegnate a mano, ma create dal modello VISTA3D (He et al., 2024) su 127 strutture e lesioni. Dove esistono etichette manuali, le sostituiscono.
 
-Scelte di preprocessing:
+### 3.6 I dati di addestramento
+
+- **Circa 11.000 scansioni TC** di partenza, diventate circa **107.000 volumi** con la preparazione.
+- Fonti pubbliche: HNSCC (testa e collo), AbdomenCT-1K, AeroPath, AMOS22, COVID-19, CRLM-CT, CT-ORG, CTPelvic1K, LIDC (polmoni), NLST, MSD (task 3, 6, 7, 8, 9, 10), Multi-organ, StonyBrook, TCIA Colon, TotalSegmentator v2.
+- Due dataset interni: 237 TC con lesioni ossee e 1.386 TC di torace e addome.
+
+Le scelte di preparazione:
 - Tutte le immagini ridimensionate a dimensioni multiple di 128 (128, 256, 384, 512, 768 per asse).
-- Rimosse le CT con meno di 64 slice.
-- Volumi ad alta risoluzione ridotti di risoluzione per arricchire la rappresentanza dei casi a bassa risoluzione.
+- Rimosse le TC con meno di 64 fette (*slice*), per qualità.
+- I volumi ad alta risoluzione vengono anche ridotti di risoluzione, per avere più esempi a bassa risoluzione.
 
-Il paper è esplicito: **tutto il training è su CT**. Le MRI non sono nel paper; sono state aggiunte con le varianti successive.
+**Attenzione**: tutto il training è su **TC**. Le risonanze non sono nel paper; sono arrivate con le versioni successive.
 
-### 3.7 Risultati
+### 3.7 I risultati, con i numeri
 
-**Velocità (Tabella 1, valori dal paper).** Generazione di 512×512×512 a 1 mm su H100:
+**Velocità e qualità (Tabella 1).** Creazione di un volume 512×512×512 con spaziatura di 1 mm, su una scheda H100. Il FID è calcolato su un dataset di test diverso da quello di addestramento (AutoPET2023). Più basso è meglio.
 
 | Modello | Passi | Tempo | FID medio |
 |---|---|---|---|
 | HA-GAN | 1 | 1 s | 13.595 |
-| MedSyn | 50+20 | 100 s | 24.709 |
-| GenerateCT | 25×201 | 89 s | 10.757 |
-| MAISI (DDPM) | 1000 | 198 s + 15 s VAE | **2.441** |
+| MedSyn | 50 + 20 | 100 s | 24.709 |
+| GenerateCT | 25 × 201 | 89 s | 10.757 |
+| MAISI (DDPM) | 1000 | 198 s + 15 s di decodifica | 2.441 |
 | MAISI (DDIM) | 6 + 15 | 4.776 |
-| **MAISI-v2 (rectified flow)** | **30** | **6 s + 15 s VAE** | **2.322** |
+| **MAISI-v2 (rectified flow)** | **30** | **6 s + 15 s di decodifica** | **2.322** |
 
-La conclusione: MAISI-v2 ha una qualità paragonabile a MAISI-DDPM (anzi leggermente migliore nel FID medio) con circa 33 volte meno tempo di LDM (198 s contro 6 s). La parte VAE (15 s) resta costante.
+In parole semplici: MAISI-v2 ha una qualità simile a MAISI-DDPM (anzi leggermente migliore nel punteggio medio), ma è circa **33 volte più veloce** nella parte di creazione. I 15 secondi della decodifica restano uguali.
 
-**Passi di inferenza (Tabella 3).** Il FID medio scende da 20.3 con 5 passi a 4.4 con 10, 2.6 con 20, 2.3 con 30, 2.06 con 50, 1.97 con 100. Scelgono **30 passi** come default perché oltre c'è un rendimento decrescente.
+**Numero di passi (Tabella 3).** Più passi = immagini migliori, ma con rendimenti decrescenti:
 
-**Confronto con video (Tabella 2).** Stesso ordine di grandezza di Stable Video Diffusion e Open-Sora 2.0 per voxel, con 34 s contro 100 s e 162 s, ma non è un confronto sullo stesso compito.
+| Passi | 5 | 10 | 20 | 30 | 40 | 50 | 70 | 100 |
+|---|---|---|---|---|---|---|---|---|
+| FID medio | 20.3 | 4.4 | 2.6 | 2.3 | 2.2 | 2.1 | 2.0 | 2.0 |
 
-**Segmentazione (Tabella 4, quattro tumori più ossa).** Il dato di valutazione più importante per il tuo lavoro: si addestra un segmentatore (Auto3DSeg) con dati reali più dati sintetici, e si misura il Dice su un test set reale.
+Gli autori scelgono **30 passi** come valore predefinito, perché dopo 30 il miglioramento è piccolo.
 
-| Tumore | Solo reali | MAISI-v2 (ControlNet + contrastiva) |
-|---|---|---|
-| Fegato | 0.662 | 0.695 (+3.3%) |
-| Polmone | 0.581 | 0.655 (+7.5%) |
-| Pancreas | 0.433 | 0.497 (+6.4%) |
-| Colon | 0.449 | 0.491 (+4.2%) |
-| Ossa | 0.504 | 0.537 (+3.3%) |
+**Confronto con i video (Tabella 2).** Il paper confronta anche con modelli di video, come Stable Video Diffusion e Open-Sora 2.0, per dare un'idea di scala. Attenzione: non è un confronto sullo stesso compito. Ma dà un'idea: MAISI-v2 con la maschera impiega circa 34 secondi per un volume da 512×512×512, contro 100 e 162 secondi dei modelli video.
 
-Il testo dice che il miglioramento è significativo in **4 casi su 5** (paired t-test). Nella conversione del PDF in testo alcuni simboli di significatività sono andati persi: controlla la tabella originale prima di citare i valori di significatività.
+**Utilità per addestrare altri modelli (Tabella 4).** Questo è il test più importante per il tuo lavoro. Si addestra un modello di segmentazione (Auto3DSeg) con dati reali, e poi con dati reali più dati sintetici. Si misura il Dice su un test di dati reali.
 
-Nota importante: il confronto con la sola ControlNet senza la perdita contrastiva mostra che sul colon la ControlNet semplice **peggiora** (−4.7%), mentre con la perdita contrastiva migliora (+4.2%). È un esempio concreto del valore della loss.
+| Tumore | Solo dati reali | Con MAISI-v2 | Miglioramento |
+|---|---|---|---|
+| Fegato | 0.662 | 0.695 | +3.3% |
+| Polmone | 0.581 | 0.655 | +7.5% |
+| Pancreas | 0.433 | 0.497 | +6.4% |
+| Colon | 0.449 | 0.491 | +4.2% |
+| Ossa | 0.504 | 0.537 | +3.3% |
 
-Il FID è misurato su dati AutoPET2023 (fuori distribuzione, OOD) per valutare la generalizzazione. Il paper calcola il FID su metà centrale delle slice, per evitare slice vuote.
+Il paper dice che il miglioramento è statisticamente significativo in **4 casi su 5** (test t su campioni appaiati). Attenzione: nella copia PDF che ho letto alcuni simboli di significatività si sono persi. Prima di citare i valori di significatività, controlla la tabella originale.
 
-**Controllo di qualità sui valori HU.** Hanno definito intervalli fisiologici per la mediana dei valori HU di fegato, milza, pancreas, reni, polmoni, ossa e cervello. Con `λ` scelto bene, il 100% dei volumi generati li supera. Questo controllo è la base del `quality_check.py` del codice.
+**Il risultato più interessante.** Se si usa il ControlNet semplice, senza la perdita contrastiva, il colon **peggiora** (−4.7%). Con la perdita contrastiva diventa **migliore** (+4.2%). Quindi la perdita contrastiva fa la differenza.
+
+**Controllo di qualità sui valori HU.** Gli autori hanno calcolato gli intervalli normali della mediana dei valori HU per fegato, milza, pancreas, reni, polmoni, ossa e cervello. Un volume passa il controllo se la mediana di ogni organo cade nell'intervallo. Con un `λ` scelto bene, il 100% dei volumi passa. Questo controllo è la base del file `quality_check.py` del codice.
 
 ### 3.8 Limiti dichiarati dagli autori
 
-1. **Solo CT.** MRI e PET sono nel piano futuro.
-2. **Solo segmentazione come compito downstream.** Non valutano traduzione d'immagine, inpainting o rilevamento.
-3. **Memoria**: 24 GB bastano per 512×512×256; per 512×512×768 servono 40 GB in inferenza e 80 GB in training.
+1. **Solo TC.** Le risonanze e la PET sono nel piano futuro.
+2. **Solo la segmentazione come test.** Non hanno valutato altri compiti, come la traduzione da un'immagine all'altra, il riempimento di zone mancanti (*inpainting*) o il rilevamento.
+3. **Memoria**: 24 GB bastano per volumi 512×512×256. Per 512×512×768 servono 40 GB per creare e 80 GB per addestrare.
 
-Aggiungo io un limite che il paper non dice esplicitamente: **il FID non misura la correttezza clinica**. Un volume può avere FID basso e un tumore nella posizione sbagliata. Per questo esistono i test di Dice sul tumore e il controllo HU.
+Un limite che il paper non dichiara: un FID basso non garantisce che il tumore sia nel posto giusto dal punto di vista medico. Per questo serve anche il Dice sul tumore.
 
-### 3.9 Cosa dice il paper sulla fedeltà del tumore
+### 3.9 Il punto debole del rectified flow sui tumori
 
-Nella discussione notano che il ControlNet con rectified flow produce **tumori meno allineati** alla maschera rispetto al ControlNet con DDPM, specialmente per il colon. Le ipotesi:
-- il flusso deterministico e dritto riduce la diversità della traiettoria, quindi il modello è meno robusto a piccole perturbazioni della condizione;
-- un errore di predizione in una regione piccola o a basso contrasto si accumula durante l'integrazione.
+Il paper ammette che con il rectified flow il tumore a volte **segue meno bene la maschera** rispetto al DDPM, soprattutto per il colon. Gli autori danno due spiegazioni:
+- Il percorso deterministico e dritto riduce la varietà del percorso, quindi il modello è meno robusto a piccole variazioni della condizione.
+- Un errore in una regione piccola o poco contrastata si accumula durante il percorso.
 
-La perdita contrastiva è proposta anche come rimedio a questo. È una nota importante: il tuo tumore è piccolo e a basso contrasto, quindi questo problema ti riguarda direttamente.
+La perdita contrastiva è la risposta degli autori a questo problema. Per il tuo caso è importante: anche il tuo tumore è piccolo e poco contrastato.
 
 ---
 
-## 4. Il blog NVIDIA e la famiglia di modelli
+## 4. Il blog NVIDIA e i modelli disponibili
 
-### 4.1 Cosa dice il blog
+### 4.1 Che cosa dice il blog
 
-Il blog (22 maggio 2026) presenta NV-Generate-CTMR come **framework open source end-to-end** per generare CT e MRI sintetiche, costruito sulla famiglia MAISI. Afferma che è il primo framework open source a supportare in un singolo modello voxel di dimensioni variabili, volumi di dimensioni variabili e copertura del corpo intero.
+Il blog, del 22 maggio 2026, presenta NV-Generate-CTMR come un **sistema completo e aperto** per creare TC e risonanze sintetiche. Sostiene che è il primo progetto aperto che, con un solo modello, gestisce voxel di dimensioni diverse, volumi di dimensioni diverse e tutto il corpo.
 
-Sottolinea il principio "riusare invece di riaddestrare": il fine-tuning è più veloce ed efficiente dal punto di vista energetico rispetto al training da zero. È il principio su cui si basa il tuo piano.
+Il blog insiste su un principio: **riusare un modello è meglio che addestrarlo da zero**. Il fine-tuning, cioè il riaddestramento leggero su dati nuovi, è più veloce e consuma meno energia.
 
-Il blog cita anche un'applicazione: immagini-maschera con tumori generate da NV-Generate-CTMR sono state usate come dati di training aumentati per **NV-Segment-CTMR**.
+Cita un uso concreto: immagini-maschera con tumori generate da questo progetto sono servite come dati aggiuntivi per **NV-Segment-CTMR**, un modello di segmentazione NVIDIA.
 
-Affermazioni che sono del vendor e vanno prese come tali: "primo open source", "stato dell'arte".
+Attenzione: affermazioni come "primo progetto aperto" e "stato dell'arte" sono dell'azienda, non verificate indipendentemente.
 
 ### 4.2 La tabella dei modelli
 
-| Modello | Data rilascio | Regione | Architettura | Passi | Volume max | Uso | Licenza |
+| Modello | Parte del corpo | Quando | Architettura | Passi | Volume massimo | Uso | Licenza |
 |---|---|---|---|---|---|---|---|
-| `ddpm-ct` | ago 2024 | Corpo intero | MAISI-v1 | 1000 | 512×512×768 | Solo immagine; coppia immagine/maschera | Open source, commerciale |
-| `rflow-ct` | mar 2025 | Corpo intero | MAISI-v2 | 30 | 512×512×768 | Solo immagine; coppia immagine/maschera | Open source, commerciale |
-| `rflow-mr` | ott 2025 | Cervello, prostata, addome, mammella | MAISI-v2 | 30 | 512×512×128 | Solo immagine | **Solo ricerca** |
-| `NV-Generate-MR-Brain` | mar 2026 | Cervello intero o skull-stripped | MAISI-v2 | 30 | 512×512×256 | Solo immagine; cross-contrast | Open source, commerciale |
+| `ddpm-ct` | Tutto il corpo, TC | ago 2024 | MAISI-v1 | 1000 | 512×512×768 | Solo immagine, o coppia immagine/maschera | Aperta, commerciale |
+| `rflow-ct` | Tutto il corpo, TC | mar 2025 | MAISI-v2 | 30 | 512×512×768 | Solo immagine, o coppia immagine/maschera | Aperta, commerciale |
+| `rflow-mr` | Cervello, prostata, addome, seno | ott 2025 | MAISI-v2 | 30 | 512×512×128 | Solo immagine | **Solo ricerca** |
+| `NV-Generate-MR-Brain` | Cervello intero o senza cranio | mar 2026 | MAISI-v2 | 30 | 512×512×256 | Solo immagine; passaggio tra sequenze | Aperta, commerciale |
 
-Il blog dice che la maggior parte dei modelli è sotto **NVIDIA Open Model License**. C'è una contraddizione con la tabella: `rflow-mr` è "solo ricerca". Per il tuo progetto la licenza conta: se usi `rflow-mr` per un uso commerciale, non sei coperto.
+Il blog dice che la maggior parte dei modelli è sotto la **NVIDIA Open Model License**. C'è però una contraddizione: nella tabella `rflow-mr` risulta "solo ricerca". Per il tuo lavoro conta: se usi `rflow-mr` per scopi commerciali, non sei coperto.
 
 ### 4.3 Il modello per il cervello
 
-`NV-Generate-MR-Brain` è quello più rilevante per te:
-- basato su MAISI-v2, addestrato su **MR-RATE** (100.000 studi di MRI cerebrale da più di 83.000 pazienti, circa 700.000 volumi, con referti radiologici e metadati DICOM);
-- genera cervello intero o skull-stripped, a scelta;
-- sequenze: **T1, T2, FLAIR e SWI**;
+`NV-Generate-MR-Brain` è quello che ti interessa di più:
+- basato su MAISI-v2, addestrato su **MR-RATE**: 100.000 studi di risonanza cerebrale di più di 83.000 pazienti, circa 700.000 volumi, con referti radiologici e metadati DICOM (il formato standard dei dati delle macchine medicali);
+- crea il cervello intero o senza cranio, a scelta;
+- sequenze: **T1, T2, FLAIR e SWI** (la SWI è sensibile al sangue e al ferro);
 - risoluzione fino a 512×512×256;
-- include un modulo ControlNet per generare strutture anatomiche specificate e per la **traduzione tra sequenze** (predire una sequenza MRI a partire da un'altra).
+- include un componente ControlNet per le strutture e per passare da una sequenza all'altra (per esempio prevedere una T2 partendo da una T1).
 
-Il dataset MR-RATE ha licenza CC-BY-NC per gli istituti di ricerca. Le licenze commerciali passano da Forithmus.
+Il dataset MR-RATE è con licenza CC-BY-NC: uso libero solo per la ricerca. Per uso commerciale bisogna rivolgersi a Forithmus, l'azienda che lo distribuisce.
 
-**Attenzione, dal codice**: il download per `rflow-mr-brain` scarica solo `autoencoder_v1.pt` (dal repo CT) e `diff_unet_3d_rflow-mr-brain_v1.pt`. **Non scarica un ControlNet per il cervello.** La funzionalità ControlNet dichiarata nel blog, per il cervello, non è quindi raggiungibile con gli script di download attuali. Da verificare.
+**Attenzione dal codice**: per `rflow-mr-brain` lo script di download scarica solo l'autoencoder (dal repo CT) e il modello principale (dal repo cervello). **Non scarica un ControlNet per il cervello.** Quindi il ControlNet cerebrale citato dal blog non risulta scaricabile con gli script attuali. Da verificare su Hugging Face.
 
-### 4.4 Il comando di avvio dal blog
+### 4.4 Il comando d'avvio del blog
 
 ```bash
 git clone https://github.com/NVIDIA-Medtech/NV-Generate-CTMR.git
@@ -279,754 +290,871 @@ generate_version="rflow-ct"
 python -m scripts.inference -t ./configs/config_network_${network}.json -i ./configs/config_infer.json -e ./configs/environment_${generate_version}.json --random-seed 0 --version ${generate_version}
 ```
 
-Questo comando, letto nel codice, lancia la pipeline completa Path A/Path B per CT. Non è il comando per il cervello.
+Che cosa fa, in parole semplici: scarica il progetto, imposta una cartella per i dati temporanei, e lancia il programma principale per creare coppie immagine-maschera di TC.
+
+Attenzione: questo comando è per la TC, non per il cervello.
 
 ---
 
-## 5. Architettura del codice
+## 5. Come è organizzato il codice
 
-### 5.1 Inventario
+### 5.1 Le cartelle principali
 
-| Cartella | Contenuto | Note |
+| Cartella | Che cosa contiene | Note |
 |---|---|---|
-| `scripts/` | 21 file Python, circa 9.000 righe | Librerie e punti di ingresso CLI |
-| `configs/` | 40 file JSON | Preset di inferenza, ambienti, rete, dizionari |
-| `docs/` | 8 file Markdown | Setup, inferenza, training, dati, valutazione, performance, troubleshooting, applicazioni |
-| `skills/` | 9 file Markdown | Guide operative per le stesse pipeline |
-| Notebook | 5 nella root, 1 in `data/` | Tutorial |
-| `.github/workflows/ci.yml` | 1 | Solo pre-commit con ruff. **Nessun test automatico.** |
+| `scripts/` | I programmi veri e propri, in Python | 21 file, circa 9.000 righe |
+| `configs/` | File JSON con le impostazioni | 40 file: come lavorare, quali modelli, quali nomi |
+| `docs/` | Documenti di spiegazione | 8 file Markdown |
+| `skills/` | Guide operative per le stesse procedure | 9 file Markdown |
+| notebook (`.ipynb`) | Tutorial interattivi | 5 nella radice, 1 in `data/`. Pesanti perché contengono anche le immagini |
+| `.github/workflows/ci.yml` | Un controllo automatico | Solo lo stile del codice (ruff). **Nessun test** |
 
-### 5.2 Come si lancia il codice
+Un **notebook** è un documento che mescola testo e codice eseguibile, cella per cella. Si apre con Jupyter.
 
-Tutto è pensato per essere eseguito come **moduli Python** dalla radice della repo:
+### 5.2 Come si lancia un programma
+
+Dalla cartella principale del progetto:
 
 ```bash
-python -m scripts.<nome_file_senza_py>
+python -m scripts.nome_del_file
 ```
 
-Il file `scripts/__init__.py` rende `scripts` un package, quindi `python -m scripts.inference` funziona. La repo non è installabile come pacchetto (lo dice `pyproject.toml`).
+Esempio: `python -m scripts.inference` lancia `scripts/inference.py` (senza `.py`). Il file `scripts/__init__.py`, vuoto a parte la licenza, serve a Python per riconoscere la cartella come un pacchetto. Il progetto non si installa come pacchetto: si lancia direttamente.
 
-### 5.3 Le dipendenze esterne
+### 5.3 Le librerie esterne
 
-Gran parte dell'architettura **non è nella repo**. Le classi di rete (`AutoencoderKlMaisi`, `DiffusionModelUNetMaisi`, `ControlNetMaisi`, `RFlowScheduler`) arrivano da **MONAI** (`monai.apps.generation.maisi.networks`). Per capire le reti, bisogna leggere il codice di MONAI.
+Gran parte dei mattoni dei modelli (le reti neurali, cioè i "grafi di calcolo" che imparano) **non è nel progetto**. Arrivano dalla libreria **MONAI**, una libreria per l'imaging medico costruita su PyTorch. Quando nel codice leggi `AutoencoderKlMaisi`, `DiffusionModelUNetMaisi`, `ControlNetMaisi` o `RFlowScheduler`, la definizione è in MONAI.
 
-Le librerie principali sono: `torch`, `monai`, `numpy`, `scipy`, `scikit-image`, `nibabel`, `huggingface_hub`, `fire`, `tensorboard`, `matplotlib`.
+Le altre librerie principali:
+- `torch` (PyTorch): il motore di calcolo per le reti neurali.
+- `numpy` e `scipy`: calcoli matematici sugli array.
+- `scikit-image`: elaborazione di immagini.
+- `nibabel`: lettura e scrittura dei file NIfTI.
+- `huggingface_hub`: scaricamento dei pesi dal sito Hugging Face.
+- `fire`: trasforma una funzione Python in un comando da terminale.
+- `tensorboard`: grafici dell'addestramento.
 
-### 5.4 Grafo delle dipendenze
+### 5.4 Come si collegano i file
 
-Il punto di partenza è sempre `inference.py` (CLI principale). Da lì:
+Il programma principale è `inference.py`. Lui chiama gli altri:
 
-- `inference.py` → `download_model_data`, `sample.LDMSampler`, `sample.check_input_*`, `utils.define_instance`.
-- `sample.py` (orchestratore) → `augmentation`, `find_masks`, `quality_check`, `infer_image_from_mask`, `sample_mask`, `utils`.
-- `sample_mask.py` (generazione maschere, Path A) → `utils`, `utils_infer`.
-- `infer_image_from_mask.py` (immagine da maschera) → `augmentation`, `utils`, `utils_infer`.
-- `utils_infer.py` (cuore della generazione di immagini) → `utils`.
-- `diff_model_*.py` (modello di diffusione senza ControlNet) → `download_model_data`, `sample`, `utils`, `utils_infer`.
-- `train_controlnet.py` → `augmentation`, `diff_model_setting`, `utils`.
-- `diff_model_create_training_data.py` → `transforms`, `utils`.
+- `inference.py` chiama `download_model_data`, `sample.LDMSampler`, i controlli `check_input_*` di `sample.py` e `define_instance` di `utils.py`.
+- `sample.py` (il direttore d'orchestra) chiama `augmentation`, `find_masks`, `quality_check`, `infer_image_from_mask`, `sample_mask` e alcune funzioni di `utils`.
+- `sample_mask.py` (creazione della mappa da zero) chiama `utils` e `utils_infer`.
+- `infer_image_from_mask.py` (immagine dalla mappa) chiama `augmentation`, `utils` e `utils_infer`.
+- `utils_infer.py` (il motore dell'immagine) chiama `utils`.
+- `diff_model_*.py` (modello senza mappa) chiama `download_model_data`, `sample`, `utils`, `utils_infer`.
+- `train_controlnet.py` chiama `augmentation`, `diff_model_setting` e `utils`.
+- `diff_model_create_training_data.py` chiama `transforms` e `utils`.
+- `infer_image_from_mask_batch.py` chiama `infer_image_from_mask`, `utils` e `utils_infer`.
 
-Il file più "centrale" è `utils.py` (816 righe), che contiene post-processing, dataloader, istanziazione e perdite.
+Il file più centrale è `utils.py`, con quasi 800 righe: tutti gli altri ne usano le funzioni.
 
 ---
 
-## 6. Mappa dei file di scripts/
+## 6. A cosa serve ogni file
 
-Per ogni file: scopo, funzioni principali, uso da riga di comando, cosa legge e cosa scrive.
+Per ogni file trovi: scopo, funzioni principali, comandi da terminale, che cosa legge e che cosa scrive. Le righe tra parentesi indicano dove trovare la cosa nel file.
 
-### 6.1 `inference.py` (261 righe): pipeline completa, coppia immagine+maschera
+### 6.1 `inference.py` (261 righe): la pipeline completa, coppia immagine + maschera
 
-**Scopo.** È la CLI principale per generare coppie immagine+maschera CT. Carica tutte le reti, costruisce un `LDMSampler` e genera N campioni.
+**Scopo.** È la porta d'ingresso per creare coppie immagine-maschera di TC. Carica tutti i modelli, crea il "direttore d'orchestra" (`LDMSampler`) e genera le coppie.
 
-**Parametri**:
+**Funzione principale**: `main()` (riga 29).
+
+**Parametri da terminale**:
 
 | Flag | Default | Significato |
 |---|---|---|
-| `-e/--environment-file` | `./configs/environment.json` (**non esiste**) | Percorsi, dizionari, database maschere |
-| `-t/--config-file` | `./configs/config_maisi.json` (**non esiste**) | Definizione rete; si passa `config_network_*.json` |
-| `-i/--inference-file` | `./configs/config_infer.json` | Iperparametri di inferenza |
-| `-x/--extra-config-file` | nessuno | Override opzionali, per esempio `config_trt.json` |
-| `-s/--random-seed` | nessuno | **Non ha `type=int`**: il valore è una stringa (vedi sezione 11) |
-| `--version` | `rflow-ct` | Passato al download; non viene validato |
-| `--low-vram` | disattivato | Tiene i modelli inattivi su CPU |
+| `-e` / `--environment-file` | `./configs/environment.json` (**non esiste**) | Percorsi, dizionari, archivio delle maschere |
+| `-t` / `--config-file` | `./configs/config_maisi.json` (**non esiste**) | Struttura della rete; si passa `config_network_*.json` |
+| `-i` / `--inference-file` | `./configs/config_infer.json` | Impostazioni di creazione |
+| `-x` / `--extra-config-file` | nessuno | Impostazioni aggiuntive, per esempio `config_trt.json` |
+| `-s` / `--random-seed` | nessuno | Il seme casuale (vedi [sezione 11](#11-problemi-noti)) |
+| `--version` | `rflow-ct` | Passato al download; non viene verificato |
+| `--low-vram` | disattivo | Tiene i modelli inattivi sulla CPU, per schede con poca memoria |
 
-**Flusso**:
-1. Imposta `PYTORCH_CUDA_ALLOC_CONF` e fissa il seme se richiesto.
-2. Cartella dati da `MONAI_DATA_DIRECTORY` o da una cartella temporanea.
-3. Se `controllable_anatomy_size` o `controllable_demographics` è non vuoto, va in **Path A** e non scarica il database delle maschere; altrimenti scarica anche quello (Path B).
-4. Legge l'ambiente e costruisce i percorsi.
-5. Unisce configurazione di rete, inferenza e override.
-6. Valida l'input con `check_input_ct` (modalità 1–7) o `check_input_mr` (modalità 8–20).
-7. Costruisce i due scheduler di rumore.
-8. Hard-code `torch.device("cuda")`: serve la GPU.
-9. Carica i checkpoint: autoencoder dell'immagine, UNet dell'immagine, ControlNet (copiato dalla UNet e poi caricato), autoencoder della maschera, UNet della maschera.
-10. Crea `LDMSampler` e chiama `sample_multiple_images`.
-11. Stampa la memoria GPU massima.
+Il **seme casuale** (seed) è un numero che fissa la sequenza del caso: con lo stesso seme, il risultato è sempre uguale. Serve per riprodurre un esperimento.
 
-**Legge**: ambiente, rete, inferenza, eventuale extra; tutti i checkpoint; database e zip delle maschere; dizionari; statistiche mediane.
-**Scrive**: `sample_<timestamp>_image.nii.gz` e `sample_<timestamp>_label.nii.gz` per ogni campione.
+**Che cosa fa, in ordine**:
+1. Imposta la memoria della scheda grafica e il seme casuale.
+2. Stabilisce la cartella dei dati: quella di `MONAI_DATA_DIRECTORY`, oppure una cartella temporanea.
+3. Se hai indicato dimensioni d'organo o dati del paziente, va in **Percorso A** (mappa da zero) e non scarica l'archivio. Altrimenti va in **Percorso B** e scarica anche l'archivio.
+4. Legge l'ambiente e costruisce i percorsi dei file.
+5. Unisce le impostazioni della rete, della creazione e quelle extra. Se non indicate, usa `cfg_guidance_scale = 0` e `mask_generation_cfg_guidance_scale = 2.0`.
+6. Controlla l'input con `check_input_ct` (modalità da 1 a 7, cioè TC) oppure `check_input_mr` (da 8 a 20, cioè risonanza).
+7. Crea i due "scheduler", cioè i programmi che decidono il rumore passo per passo: uno per l'immagine, uno per la maschera.
+8. Imposta la GPU in modo fisso: `torch.device("cuda")`. Senza GPU NVIDIA non va.
+9. Carica i pesi dei modelli: autoencoder dell'immagine, modello principale dell'immagine, ControlNet (copiato dal modello principale e poi caricato), autoencoder della maschera, modello della maschera.
+10. Crea il `LDMSampler` e lancia la generazione di N campioni.
+11. Stampa la memoria massima usata.
 
-### 6.2 `infer_image_from_mask.py` (527 righe): maschera utente → immagine
+**Che cosa legge**: i file di ambiente, rete, creazione e quelli extra; tutti i checkpoint (i file dei pesi); l'archivio e i dizionari; le statistiche dei tessuti.
 
-**Scopo.** È il file più importante **per il tuo caso d'uso**: prende una maschera NIfTI che hai già (per esempio la tua segmentazione) e genera l'immagine CT/MR corrispondente. È sia libreria sia CLI.
+**Che cosa scrive**: per ogni campione, `sample_<data-ora>_image.nii.gz` e `sample_<data-ora>_label.nii.gz`.
 
-**Funzioni**:
-- `ldm_conditional_sample_one_image_from_mask` (riga 65): wrapper che chiama il cuore della generazione in `utils_infer.py`. Imposta il valore di sfondo: −1000 HU per CT, 0 per MR. Se CFG > 0, crea la maschera non condizionata rimuovendo i tumori (`remove_tumors`).
-- `crop_img_body_mask` (riga 173): imposta a sfondo i voxel fuori dal corpo.
-- `validate_user_mask` (righe 294–379): carica la maschera con MONAI, la porta in orientamento RAS, avvisa se ci sono etichette fuori da 0..132 o se manca l'etichetta 200 (corpo), e ricampiona se la forma o la spaziatura non sono valide.
-- `_suggest_valid_target` (riga 251): propone una forma valida mantenendo circa lo stesso FOV.
+**Dipende da**: `download_model_data.py`, `sample.py`, `utils.define_instance`.
+
+### 6.2 `infer_image_from_mask.py` (527 righe): dalla tua maschera all'immagine
+
+**Scopo.** È il file più utile per il tuo lavoro. Gli dai una maschera NIfTI che hai già (per esempio la tua segmentazione) e lui crea l'immagine TC o MR che corrisponde. È sia una libreria da importare sia un programma da terminale.
+
+**Funzioni principali**:
+- `ldm_conditional_sample_one_image_from_mask` (riga 65): la funzione principale. Per la TC lo sfondo vale −1000 HU; per la risonanza vale 0. Se la CFG è maggiore di zero, crea la versione "senza tumore" della maschera (per la guida). Poi chiama il motore `run_controlnet_conditioned_image_dm` e ritaglia il corpo.
+- `crop_img_body_mask` (riga 173): i punti fuori dal corpo vengono riportati allo sfondo.
+- `validate_user_mask` (righe 294–379): controlla la tua maschera. Carica il file, la porta nell'orientamento standard RAS, avvisa se ci sono numeri di struttura fuori dall'intervallo 0–132 o se manca il numero 200 (corpo), e la ricampiona se dimensione o spaziatura non vanno bene.
+- `_suggest_valid_target` (riga 251): propone una dimensione valida che mantiene più o meno lo stesso FOV.
 - `_USER_MASK_FORMAT_WARNING` (righe 214–243): avviso stampato su stderr sul formato della maschera.
 
-**CLI** (righe 391–415):
+**Parametri da terminale** (righe 391–415):
 
 | Flag | Obbligatorio | Significato |
 |---|---|---|
-| `--mask` | sì | Maschera NIfTI dell'utente |
+| `--mask` | sì | La tua maschera NIfTI |
 | `-t` | sì | `config_network_*.json` |
 | `-e` | sì | `environment_*.json` |
 | `-i` | sì | `config_infer*.json` |
 | `--random-seed` | no, default 0 | Seme |
-| `--low-vram` | no | Offload su CPU |
+| `--low-vram` | no | Usa la CPU per alcuni modelli |
 
-**Flusso**: valida la maschera; carica i modelli (con fallback su CPU alla riga 433); costruisce i tensori di condizione; campiona; salva con MONAI `SaveImage`.
+**Flusso**: valida la maschera; carica i modelli (con ripiego sulla CPU alla riga 433); costruisce i tensori della condizione, cioè i dati che il modello legge come istruzioni, con forma `[C, X/4, Y/4, Z/4]`; genera; salva con `SaveImage` di MONAI.
 
-**Scrive**: solo `<stem_maschera>_<timestamp>_image.nii.gz`. **Non salva la maschera** (il commento nella skill dice diversamente).
+**Che cosa scrive**: solo `<nome_maschera>_<data-ora>_image.nii.gz`. **Non salva la maschera** (alcune skill dicono il contrario).
 
-### 6.3 `infer_image_from_mask_batch.py` (196 righe): batch su manifest JSON
+**Dipende da**: `augmentation.remove_tumors`, `utils.binarize_labels`, `utils_infer`, `diff_model_setting.load_config`.
 
-Esegue solo la fase immagine-da-maschera su un file JSON con un elenco di casi. Usa il **fold di validazione** del dataloader, quindi non elabora tutti i casi. Supporta DDP con `-g` maggiore di 1.
+### 6.3 `infer_image_from_mask_batch.py` (196 righe): la stessa cosa su tanti casi
 
-Chiavi attese nel manifest: `label`, `dim`, `spacing`; le regioni del corpo solo per `ddpm-ct`.
+Legge un file JSON (chiamato *manifest*), che elenca più casi, e crea le immagini di tutti. Usa solo il "fold" di validazione del dataset, quindi non tutti i casi. Con più schede grafiche (`-g`) lavora in parallelo.
 
-### 6.4 `sample.py` (718 righe): orchestratore `LDMSampler`
+Chiavi attese nel manifest: `label` (il file della maschera), `dim` (la dimensione), `spacing` (la spaziatura). La regione del corpo serve solo per il DDPM.
 
-**Scopo.** È il cervello di `inference.py`. Decide se usare Path A o Path B, gestisce il ciclo di tentativi, impone output_size e spacing, fa il controllo di qualità e salva.
+**CLI**: `-t`, `-e`, `-i` obbligatori; `-g` (default 1); `--low-vram`.
+
+**Che cosa scrive**: `sample_<data-ora>_image.nii.gz` e `_label.nii.gz` nella cartella di uscita.
+
+### 6.4 `sample.py` (718 righe): il direttore d'orchestra
+
+**Scopo.** Coordina tutto il lavoro di `inference.py`. Decide se usare il Percorso A (mappa da zero) o il Percorso B (mappa dall'archivio), gestisce i tentativi, impone la dimensione e la spaziatura, fa il controllo di qualità e salva.
 
 **Classe `LDMSampler`**:
-- `__init__` (righe 71–225): memorizza le reti, converte `anatomy_list` in interi con `label_dict`, costruisce le etichette per la conditioning e la mappa per il controllo di qualità.
-- `sample_multiple_images(num_img)` (righe 227–369): ciclo centrale, descritto in [sezione 9](#9-flussi-end-to-end).
-- `select_mask` (righe 371–388): mescola e cicla le maschere, con augmentation sempre attiva.
-- `sample_one_pair`, `prepare_anatomy_size_condition`, `prepare_one_mask_and_meta_info`, `sample_one_mask`.
-- `ensure_output_size_and_spacing` (righe 537–580): ricampionamento nearest su `Spacing` e `ResizeWithPadOrCrop`; solleva un errore se le etichette anatomiche vengono perse.
-- `read_mask_information`, `find_closest_masks` (righe 607–667), `resample_mask_check_organ_list`, `quality_check_ct` (righe 700–718).
+- `__init__` (righe 71–225): conserva i modelli, trasforma i nomi delle strutture richieste in numeri usando il dizionario, prepara le liste per il controllo di qualità. Richiede che la finestra di calcolo dell'autoencoder sia multipla di 16.
+- `sample_multiple_images(num_img)` (righe 227–369): il ciclo principale. Dettagli nella [sezione 9](#9-il-percorso-di-unimmagine-passo-per-passo).
+- `select_mask` (righe 371–388): mescola e cicla le maschere dell'archivio. L'augmentation è sempre attiva.
+- `sample_one_pair`, `prepare_anatomy_size_condition`, `prepare_one_mask_and_meta_info`, `sample_one_mask`: passaggi intermedi.
+- `ensure_output_size_and_spacing` (righe 537–580): ricampiona con il metodo "nearest" (prende il valore del punto più vicino, senza mescolare le etichette) e poi aggiunge o taglia il bordo per arrivare alla dimensione finale. Se le strutture richieste vanno perse, solleva un errore.
+- `read_mask_information` (righe 582–605): legge le informazioni di una maschera.
+- `find_closest_masks` (righe 607–667): cerca le maschere più simili.
+- `resample_mask_check_organ_list` (righe 669–698): scarta le maschere che hanno perso gli organi richiesti.
+- `quality_check_ct` (righe 700–718): il controllo di qualità.
 
-**Funzioni esterne ri-esportate**: `check_input_ct`, `check_input_mr`, `ldm_conditional_sample_one_image`, `crop_img_body_mask`, ecc.
+**Che cosa scrive**: le coppie immagine-etichetta. Nel Percorso B l'etichetta viene filtrata e tiene solo le strutture richieste; nel Percorso A tiene tutte le 132 classi.
 
-### 6.5 `sample_mask.py` (400 righe): generazione maschera da zero (Path A) e validatori
+### 6.5 `sample_mask.py` (400 righe): la mappa da zero, e i controllori degli input
 
-**Scopo.** Genera una maschera 3D da zero con il modello di maschere v2 (AdaGN), condizionato da un vettore di 19 valori. Contiene anche i validatori di input.
+**Scopo.** Crea una mappa delle strutture da zero, usando il modello delle maschere (versione 2, con AdaGN). Il modello è guidato da un vettore di **19 numeri** che descrive cosa vuoi. Contiene anche i due controllori degli input (`check_input_ct` e `check_input_mr`).
 
 **Costanti importanti**:
-- `ANATOMY_SIZE_IDX` (righe 57–72): gli slot 0–13 del vettore di condizione. Fegato 0, milza 1, stomaco 2, pancreas 3, colon 4, rene sinistro 5, rene destro 6, polmone 7, cistifellea 8, tumore polmonare 9, tumore pancreatico 10, tumore epatico 11, tumore del colon 12, lesione ossea 13.
-- `_DEMOG_MAX` (riga 53): normalizzazione di età, peso, BMI, altezza.
-- `N_ANATOMY=14`, `N_DEMOG=5`, `N_COND=19`.
+- `ANATOMY_SIZE_IDX` (righe 57–72): i primi 14 numeri del vettore sono le dimensioni degli organi e dei tumori richiesti. Per esempio: fegato (posizione 0), milza (1), stomaco (2), pancreas (3), colon (4), rene sinistro (5), rene destro (6), polmone (7), cistifellea (8), tumore del polmone (9), tumore del pancreas (10), tumore del fegato (11), tumore del colon (12), lesione ossea (13).
+- `_DEMOG_MAX` (riga 53): i valori massimi per normalizzare età, peso, BMI e altezza. Servono a riportare tutto tra 0 e 1.
+- `N_ANATOMY = 14`, `N_DEMOG = 5`, `N_COND = 19` (19 = 14 + 5).
 
-**Funzioni**:
-- `ldm_conditional_sample_one_mask` (righe 78–195): genera la maschera. Passi: vettore non condizionato a −1; spaziatura × 100; rumore; RFlow con 100 passi; CFG con `uncond + s·(cond − uncond)`; decodifica a finestra scorrevole; softmax su 125 canali; argmax; rimappatura con `label_dict_124_to_132.json`; scelta dell'etichetta del tumore target; post-processing.
-- `filter_mask_with_organs` (righe 198–215): mantiene solo le etichette richieste.
-- `check_input_ct` (righe 218–346): regole su dimensioni, spaziatura, FOV ≥ 256 mm, demografia, **al massimo una voce di anatomia** (riga 298), campi di Path B.
-- `check_input_mr` (righe 349–400): regole analoghe per MR.
+**Funzioni principali**:
+- `ldm_conditional_sample_one_mask` (righe 78–195): genera la mappa. I passi: il vettore "vuoto" è tutto −1; la spaziatura viene moltiplicata per 100 (per averla come numero intero leggibile); parte il rumore; il RFlow fa 100 passi con CFG 2.0; il modello dà 125 canali; si sceglie la classe più probabile per ogni punto (argmax); si rimappano le classi nelle 132 finali; si sceglie il tumore target; si applicano le regole di pulizia.
+- `filter_mask_with_organs` (righe 198–215): tiene solo le etichette richieste.
+- `check_input_ct` (righe 218–346): regole per la TC: dimensioni (righe 242–245), spaziatura (246–249), campo di vista di almeno 256 mm (250–254), controlli sui dati del paziente (256–291), **una sola voce di anatomia** (298–302), controlli per il Percorso B (336–345).
+- `check_input_mr` (righe 349–400): regole simili per la risonanza. Controlla che le strutture richieste esistano nel dizionario.
 
-### 6.6 `utils_infer.py` (491 righe): il cuore della generazione di immagini
+### 6.6 `utils_infer.py` (491 righe): il motore che crea le immagini
 
-Questo file contiene la **logica condivisa** per generare immagini con il ControlNet.
+**Scopo.** È il cuore della creazione dell'immagine dalla mappa. È condiviso da più programmi.
 
-- `ReconModel` (righe 67–92): decodifica con `z / scale_factor` tramite l'autoencoder.
-- `initialize_noise_latents` (righe 95–115): rumore gaussiano fp16 di forma `[1, C, X, Y, Z]`.
-- `run_controlnet_conditioned_image_dm` (righe 118–341): **il loop centrale**. Per ogni passo: ControlNet, UNet con i residui del ControlNet, passo dello scheduler. Poi decodifica e conversione in HU.
-- `load_image_models` (righe 344–390): carica autoencoder, UNet, ControlNet (copiato dalla UNet e poi caricato) e scheduler.
-- `load_mask_models` (righe 393–434): carica autoencoder e UNet delle maschere.
-- `load_paired_inference_models` (righe 437–460): combina i due.
-- `build_conditioning_tensors` (righe 463–491): spaziatura × 100, one-hot delle regioni se il modello le usa, tensore della modalità.
+**Funzioni principali**:
+- `move_models` (riga 59): sposta i modelli sulla GPU o sulla CPU.
+- `ReconModel` (righe 67–92): il decompressore. Riporta l'immagine compressa all'immagine piena, dividendo per il fattore di scala.
+- `initialize_noise_latents` (righe 95–115): crea il rumore di partenza, come una immagine di neve casuale nello spazio compresso.
+- `run_controlnet_conditioned_image_dm` (righe 118–341): **il ciclo centrale**. Per ogni passo: il ControlNet guarda la maschera e produce indicazioni; il modello principale riceve queste indicazioni e corregge l'immagine; lo scheduler fa un piccolo passo verso l'immagine finale. Alla fine decomprime e converte in HU.
+- `load_image_models` (righe 344–390): carica autoencoder, modello principale, ControlNet e scheduler.
+- `load_mask_models` (righe 393–434): carica autoencoder, modello e scheduler delle maschere.
+- `load_paired_inference_models` (righe 437–460): carica entrambi.
+- `build_conditioning_tensors` (righe 463–491): prepara le condizioni: la spaziatura (×100), gli indicatori delle regioni del corpo (solo se il modello li usa), la modalità.
 
-### 6.7 `utils.py` (816 righe): post-processing, dataloader, perdite
+Il **tensore** è semplicemente un array multidimensionale, cioè una griglia di numeri con più assi.
 
-Il file più grande. Contiene quattro gruppi di funzioni.
+### 6.7 `utils.py` (816 righe): gli attrezzi generali
 
-**Maschere e etichette**:
-- `remap_labels` (righe 35–56): rimappa etichette con coppie `[origine, destinazione]`.
-- `binarize_labels` (righe 173–188): converte l'intero in 8 canali binari. **È l'input del ControlNet.** Per questo le etichette possono arrivare a 255.
-- `organ_fill_by_closing`, `organ_fill_by_removed_mask`: riempimento di organi.
-- `get_body_region_index_from_mask` (righe 389–425): regioni del corpo dalla maschera. Testa: etichette 22 e 120. Torace: 28–32. Addome: 1, 2, 3, 4, 5, 14. Pelvi: 93, 94.
-- `add_body_envelope` (righe 428–565): crea l'involucro del corpo dall'aria nell'immagine (soglia −800 HU), rimuove il lettino e riempie con l'etichetta 200. Usato solo in alcuni casi.
-- `general_mask_generation_post_process` (righe 568–695): il post-processing più complesso. Include `tumor_organ_dict = {23:28, 24:4, 26:1, 27:62, 128:200}`, regole per l'intestino, riempimenti per chiusura, regole per tumori 23, 26, 27, 129, vasi epatici (25 → fegato 1), vie aeree (132 mantenuto).
+Il file più grande. Ha quattro gruppi di funzioni.
 
-**Dataloader e istanziazione**:
-- `define_instance` (righe 208–224): istanzia oggetti MONAI da un JSON con `_target_`.
-- `prepare_maisi_controlnet_json_dataloader` (righe 261–340): dataloader per il ControlNet. Usa `CacheDataset` con 8 worker.
-- `add_data_dir2path` (righe 227–258): aggiunge il prefisso dei dati e divide per fold.
+**Gruppo 1: sistemare le maschere e le etichette**
+- `remap_labels` (righe 35–56): cambia numeri di etichetta secondo una tabella di coppie `[vecchio, nuovo]`.
+- `binarize_labels` (righe 173–188): trasforma il numero di ogni punto in 8 "strati" binari. Questo è l'input che il ControlNet riceve. Per questo le etichette possono arrivare a 255.
+- `organ_fill_by_closing` (righe 343–366) e `organ_fill_by_removed_mask` (righe 369–386): riempiono i buchi negli organi.
+- `get_body_region_index_from_mask` (righe 389–425): riconosce la regione del corpo dalla maschera. Testa: etichette 22 e 120. Torace: 28–32. Addome: 1, 2, 3, 4, 5, 14. Bacino: 93 e 94.
+- `add_body_envelope` (righe 428–565): crea il contorno del corpo partendo dall'aria nell'immagine (sotto −800 HU). Rimuove il lettino e riempie il corpo con l'etichetta 200.
+- `general_mask_generation_post_process` (righe 568–695): la pulizia più complessa, dopo la generazione. Contiene la tabella `tumor_organ_dict = {23: 28, 24: 4, 26: 1, 27: 62, 128: 200}`, regole per l'intestino, riempimenti per chiusura, regole per i tumori 23, 26, 27 e 129, e le regole per i vasi epatici (25 diventa fegato 1) e per le vie aeree (132 resta).
 
-**Perdite e inferenza dinamica**:
-- `KL_loss` (righe 763–782): divergenza KL per il VAE.
+**Gruppo 2: dati e oggetti**
+- `define_instance` (righe 208–224): crea un oggetto MONAI leggendo un file JSON con la voce `_target_`.
+- `add_data_dir2path` (righe 227–258): aggiunge il percorso della cartella ai nomi dei file e divide tra training e validazione.
+- `prepare_maisi_controlnet_json_dataloader` (righe 261–340): prepara i dati per il ControlNet. Usa `CacheDataset` con 8 processi in parallelo, che tiene i dati in memoria per non rileggerli.
+
+**Gruppo 3: perdite**
+- `KL_loss` (righe 763–782): misura quanto la distribuzione compressa si discosta dalla normale. Serve al VAE.
 - `MapLabelValue` (righe 698–760): rimappatura con MONAI.
-- `dynamic_infer` (righe 785–816): inferenza con finestra scorrevole.
 
-### 6.8 `find_masks.py` (157 righe): cercare una maschera nel database (Path B)
+**Gruppo 4: creazione a blocchi**
+- `dynamic_infer` (righe 785–816): elabora un volume grande a blocchi sovrapposti (finestra scorrevole), perché non sta in memoria in un colpo solo.
 
-`find_masks(body_region, anatomy_list, spacing, output_size, check_spacing_and_output_size, database_filepath, mask_foldername)`.
+### 6.8 `find_masks.py` (157 righe): cercare una maschera nell'archivio (Percorso B)
 
-- Converte la regione in indice: head 0, chest/thorax 1, abdomen 2, pelvis 3.
-- Estrae lo zip delle maschere se la cartella non esiste.
-- Carica il database JSON. Tiene un elemento solo se **tutte** le etichette di anatomia sono presenti e le regioni coprono quelle richieste.
-- Se non c'è un tumore nella lista di anatomia, **scarta** gli elementi con etichette tumorali `[23, 24, 26, 27, 128]`.
-- Controlla spaziatura e dimensioni esatte, se richiesto.
+**Funzione**: `find_masks(body_region, anatomy_list, spacing, output_size, check_spacing_and_output_size, database_filepath, mask_foldername)` (righe 55–157).
 
-### 6.9 `quality_check.py` (148 righe): controllo di qualità HU
+Che cosa fa, passo per passo:
+- Trasforma il nome della regione in un numero: testa 0, torace 1, addome 2, bacino 3 (`convert_body_region`, righe 21–52).
+- Se la cartella delle maschere non esiste, estrae lo zip dell'archivio (righe 89–97).
+- Carica il file del database (righe 99–102).
+- Tiene un elemento solo se **tutte** le strutture richieste sono presenti (riga 107) e se le regioni del corpo coprono quelle richieste (righe 114–124).
+- Se nell'elenco non c'è un tumore, **scarta** gli elementi che hanno etichette tumorali `[23, 24, 26, 27, 128]` (righe 126–129).
+- Se richiesto, controlla che spaziatura e dimensione siano esattamente quelle (righe 131–135).
 
-- `get_masked_data`: estrae i voxel dalla maschera di un organo (`np.isin` se ci sono almeno 3 etichette, altrimenti OR logico).
-- `is_outlier` (righe 69–148): confronta la mediana dell'organo con l'intervallo di riferimento (percentile 0.5/99.5 o sigma 6, il più estremo dei due). Per le ossa il limite superiore è 1000 HU.
-- Controlla solo sette gruppi: fegato, milza, pancreas, rene, polmone, osso, cervello. **Non controlla i tumori.**
+Restituisce una lista di dizionari con nome del file della maschera, spaziatura, dimensione, eventuali regioni.
 
-### 6.10 `augmentation.py` (594 righe): augmentation delle maschere reali e rimozione dei tumori
+### 6.9 `quality_check.py` (148 righe): il controllo di qualità
 
-Contiene due blocchi:
+- `get_masked_data` (righe 15–66): estrae i punti di un organo dalla maschera. Con almeno tre etichette usa `np.isin` (controlla se il valore è in un elenco); altrimenti usa il "OR logico" (una condizione semplice).
+- `is_outlier` (righe 69–148): confronta la mediana dell'organo con l'intervallo normale. Il limite inferiore è il più estremo tra il percentile 0.5 e la soglia 6-sigma; il limite superiore è il più estremo tra il percentile 99.5 e la soglia 6-sigma. Per le ossa il limite superiore è 1000 HU (righe 114–115).
 
-**Augmentation (Path B)**. Per ogni tipo di tumore c'è una funzione che deforma la maschera con trasformazioni affini o elastiche e la riposiziona dentro l'organo:
-- `augmentation_tumor_bone` (etichetta 128), `augmentation_tumor_liver` (26), `augmentation_tumor_lung` (23), `augmentation_tumor_pancreas` (24), `augmentation_tumor_colon` (27), `augmentation_tumor_only` (BraTS, 401–403).
-- `augmentation_body` (righe 337–346): zoom casuale tra 0.99 e 1.01 per le maschere senza tumore.
-- `augmentation` (righe 436–481): sceglie la funzione in base alle etichette presenti.
+Sigma è la deviazione standard, cioè quanto i valori si allontanano in media dal centro. "6-sigma" è una soglia molto ampia, quindi scatta solo per valori davvero strani.
 
-**Rimozione dei tumori (per il ControlNet non condizionato)**:
-- `remove_tumors` (righe 484–520): sostituisce le etichette tumorali con l'organo di origine. Mappa `{26:1, 24:4, 27:62, 116:14, 117:5}`. Per i polmoni usa un voto a maggioranza.
-- `remap_labels` (righe 580–594): versione locale, **diversa** da `utils.remap_labels`.
+Controlla solo sette gruppi: fegato, milza, pancreas, rene, polmone, osso e cervello. **Non controlla i tumori.**
 
-**Attenzione**: i cicli di augmentation per fegato, polmone e pancreas sono `while True` senza limite. Se una maschera non ha abbastanza volume dentro l'organo, il programma può non finire. Solo BraTS e colon hanno un limite. Vedi [sezione 11](#11-bug-rischi-e-punti-da-verificare).
+### 6.10 `augmentation.py` (594 righe): variazioni delle maschere reali
 
-### 6.11 `diff_model_setting.py` (139 righe): configurazione condivisa
+**Scopo.** Prende una maschera reale dall'archivio e la varia: la ruota, la allunga, la sposta, la deforma (con una deformazione elastica, come una gomma che si piega). Così il modello vede molte varianti invece di una sola.
 
-- `setup_logging`, `load_config(env, model_cfg, model_def)`: unisce i file JSON con `setattr`, quelli successivi sovrascrivono.
-- `initialize_distributed`: inizializzazione DDP.
-- `run_torchrun`: lancia sottoprocessi con torchrun. **Nessun file Python lo chiama**: codice morto.
+**Due blocchi.**
 
-### 6.12 `diff_model_train.py` (541 righe): training del modello di diffusione per le immagini
+*Blocco 1: l'augmentation vera e propria (Percorso B)*
+- `augmentation_tumor_bone` (righe 68–118): lesione ossea, etichetta 128. Usa trasformazioni affini (rotazioni, spostamenti) e controlla che la lesione stia dentro l'osso. Ripete finché la sovrapposizione è sufficiente (soglia 0.8 per i primi 40 tentativi, poi 0.75).
+- `augmentation_tumor_liver` (righe 121–168): tumore del fegato, etichetta 26, con deformazione elastica.
+- `augmentation_tumor_lung` (righe 171–226): tumore del polmone, etichetta 23, spostato dentro un lobo.
+- `augmentation_tumor_pancreas` (righe 229–276): tumore del pancreas, etichetta 24, dentro il pancreas (4).
+- `augmentation_tumor_colon` (righe 279–334): tumore del colon, etichetta 27, dentro il colon (62). Si ferma dopo 40 tentativi.
+- `augmentation_body` (righe 337–346): zoom casuale tra 0.99 e 1.01 quando non ci sono tumori.
+- `augmentation_tumor_only` (righe 349–408): versione generica per i tumori cerebrali di BraTS (etichette 401–403).
+- `augmentation` (righe 436–481): sceglie quale funzione usare in base alle etichette presenti.
 
-**Scopo.** Addestra la UNet dell'immagine (senza ControlNet) sugli embedding latenti prodotti da `diff_model_create_training_data.py`.
+*Blocco 2: rimuovere i tumori (serve per la versione "senza tumore")*
+- `remove_tumors` (righe 484–520): sostituisce le etichette dei tumori con quelle dell'organo di origine. La tabella è `{26: 1, 24: 4, 27: 62, 116: 14, 117: 5}`. Per il polmone usa un voto a maggioranza tra i vicini (`remove_tumors_majority_vote`, righe 523–577).
+- `remap_labels` (righe 580–594): una versione locale della rimappatura. **Attenzione**: è diversa da quella in `utils.py`.
 
-**Punti chiave**:
-- `augment_modality_label` (righe 36–66): con probabilità 10% sostituisce la modalità con 0, la classe "nulla" per la CFG. Per CT i codici 2–7 diventano 1; per MR quelli ≥ 9 diventano 8.
-- `prepare_data` (righe 85–139): legge spaziatura da un JSON laterale, regione e modalità. `DataLoader(num_workers=6)` è fisso nel codice.
-- `calculate_scale_factor` (righe 174–195): `scale_factor = 1/std` del primo batch. Questo valore viene salvato nel checkpoint.
-- `train_one_epoch` (righe 226–366): moltiplica le immagini per lo scale factor, sceglie il timestep, calcola il target `immagini − rumore` per RFlow (o la variante DDPM), L1, AMP.
-- `save_checkpoint` (righe 369–400): salva `{epoch, loss, num_train_timesteps, scale_factor, unet_state_dict}` sovrascrivendo ogni epoca.
-- Ottimizzatore: Adam. Scheduler: `PolynomialLR` con potenza 2.
+**Problema importante.** I cicli di augmentation per fegato, polmone e pancreas sono `while True` (righe 149, 205, 257): girano finché non trovano una variante valida. Se la maschera non ha abbastanza spazio dentro l'organo, il programma può non finire mai. Solo BraTS e colon hanno un limite. Vedi [sezione 11](#11-problemi-noti).
 
-**Attenzione**: si aspetta un file JSON laterale `<embedding>.nii.gz.json` per ogni elemento, ma nessun script del repo lo crea. Vedi [sezione 11](#11-bug-rischi-e-punti-da-verificare).
+### 6.11 `diff_model_setting.py` (139 righe): le impostazioni comuni
 
-### 6.13 `train_controlnet.py` (560 righe): training del ControlNet
+- `setup_logging` (righe 26–44): imposta i messaggi di log, cioè quello che il programma scrive mentre lavora.
+- `load_config(env, model_cfg, model_def)` (righe 47–76): unisce i file JSON. Se due file hanno la stessa chiave, vince l'ultimo.
+- `initialize_distributed` (righe 79–95): prepara il calcolo su più schede (DDP, *distributed data parallel*).
+- `run_torchrun` (righe 98–139): lancia sottoprocessi con torchrun. **Nessun file Python lo chiama**: è codice inutilizzato.
 
-**Scopo.** Addestra il ControlNet mantenendo congelata la UNet dell'immagine.
+### 6.12 `diff_model_train.py` (541 righe): addestrare il modello principale dell'immagine
 
-**Punti chiave**:
-- `remove_roi` (righe 37–56): rimuove i tumori per la perdita contrastiva.
-- `compute_region_contrasive_loss` (righe 59–124): implementa la perdita ROI e background del paper. Nota: nel nome c'è un refuso (`contrasive`), ma è la funzione giusta.
-- `compute_model_output` (righe 127–237): binarizza la maschera, aggiunge rumore, passa per ControlNet e UNet.
-- `train_controlnet` (righe 240–537):
-  - carica la UNet congelata e lo scale factor (righe 292–302);
-  - inizializza il ControlNet copiando i pesi della UNet (riga 307), oppure carica `existing_ckpt_filepath`;
-  - AdamW con lr 1e-5; `PolynomialLR` con potenza 2;
-  - AMP sempre attiva (riga 394);
-  - perdita L1, con pesatura sulle etichette `weighted_loss_label` e perdita contrastiva opzionale;
-  - salva `{exp_name}_current.pt` ogni epoca e `{exp_name}_best.pt` quando migliora.
+**Scopo.** Insegna al modello principale a creare immagini, partendo dalle versioni compresse di immagini reali (gli "embedding", prodotti da `diff_model_create_training_data.py`).
 
-**Attenzione**: il loader di validazione viene **scartato** (riga 337: `train_loader, _ = ...`). Non c'è nessuna metrica di validazione.
+**Funzioni principali**:
+- `augment_modality_label` (righe 36–66): ogni tanto (10% delle volte) sostituisce la modalità con 0. Così il modello impara anche a lavorare senza indicazioni di tipo. Lo zero è la "classe nulla" della CFG. Per la TC i codici 2–7 diventano 1; per la risonanza quelli da 9 in su diventano 8.
+- `load_filenames` (righe 69–82): trasforma i nomi dei file per trovare gli embedding.
+- `prepare_data` (righe 85–139): legge la spaziatura da un file accompagnatore, la regione del corpo e la modalità. Usa 6 processi per caricare i dati.
+- `load_unet` (righe 142–171): carica il modello principale, con DDP se ci sono più schede.
+- `calculate_scale_factor` (righe 174–195): calcola il fattore di scala come 1 diviso la deviazione standard del primo batch. Il fattore viene salvato nel file dei pesi.
+- `create_optimizer` (righe 198–209): ottimizzatore Adam.
+- `create_lr_scheduler` (righe 212–223): riduce il learning rate con una curva polinomiale di potenza 2.
+- `train_one_epoch` (righe 226–366): moltiplica le immagini per il fattore di scala, sceglie il passo di tempo casuale, calcola il bersaglio (per RFlow: immagine meno rumore), calcola l'errore L1 (la differenza assoluta media), aggiorna i pesi. Usa l'AMP (precisione mista, più veloce).
+- `save_checkpoint` (righe 369–400): salva `{epoch, loss, num_train_timesteps, scale_factor, unet_state_dict}`. Il file viene sovrascritto a ogni epoch.
+- `diff_model_train` (righe 403–517): cerca tutti i file da addestrare. Se un file manca, lo salta in silenzio (righe 446–448).
 
-### 6.14 `diff_model_create_training_data.py` (287 righe): codifica nello spazio latente
+**Parametri da terminale** (righe 520–541): `-e` (ambiente), `-c` (configurazione), `-t` (rete), `-g` (schede, default 1), `--no_amp` (disattiva la precisione mista).
 
-**Scopo.** Prende i volumi reali e li codifica con il VAE, producendo un file `<nome>_emb.nii.gz` per ogni volume. È il primo passo prima del training della UNet.
+**Che cosa legge**: gli embedding, i file accompagnatori, la lista dei dati, `modality_mapping.json`, il file dei pesi se si riparte da un punto già fatto.
 
-**Punti chiave**:
-- `round_number(number, base=128)`: arrotonda le dimensioni a multipli di 128.
-- `process_file` (righe 110–195): codifica con `SlidingWindowInferer` (ROI `[320,320,160]`, overlap 0.4, gaussiano), salva la media della posteriore `z_mu`.
-- Distribuzione tra le GPU in round-robin.
+**Che cosa scrive**: il file dei pesi in `model_dir/model_filename` a ogni epoch.
 
-**Attenzione**: non scrive il file JSON laterale che `diff_model_train.py` richiede (vedi sopra).
+**Attenzione**: si aspetta un file accompagnatore `<embedding>.nii.gz.json` per ogni embedding (riga 450), ma nessun programma del progetto lo crea. Vedi [sezione 11](#11-problemi-noti).
 
-### 6.15 `diff_model_infer.py` (400 righe): generazione di immagini senza ControlNet
+### 6.13 `train_controlnet.py` (560 righe): addestrare il ControlNet
 
-**Scopo.** Genera immagini con la sola UNet, senza condizione di maschera. Utile per l'immagine non condizionata o per la modalità MR.
+**Scopo.** Addestra il ControlNet, cioè il componente che legge la maschera e dice al modello dove mettere le strutture. Il modello principale resta fermo.
 
-- `run_inference` (righe 108–248): rumore, passi, CFG sulla modalità con classe 0 come non condizionata, decodifica con ROI fisso `[80,80,80]`.
-- Intensità: MR in `[0, 1000]` se modalità ≥ 8, altrimenti CT in `[−1000, 1000]`. Output `int16`.
-- `save_image`: affine diagonale dalla spaziatura.
+**Funzioni principali**:
+- `remove_roi` (righe 37–56): rimuove i tumori dalla maschera. Serve solo per la perdita contrastiva.
+- `compute_region_contrasive_loss` (righe 59–124): implementa la perdita per regione del paper. Nel nome c'è un refuso (`contrasive` invece di `contrastive`), ma la funzione è quella giusta.
+- `compute_model_output` (righe 127–237): binarizza la maschera (riga 190), aggiunge il rumore (riga 193), passa per il ControlNet (righe 197–208) e per la UNet (righe 212–233).
+- `train_controlnet` (righe 240–537): la funzione principale. Controlla la configurazione della perdita contrastiva (righe 259–277), carica il modello principale congelato e il fattore di scala (righe 292–302), blocca i pesi della UNet (righe 317–318), inizializza il ControlNet (riga 307), carica eventuali pesi precedenti (righe 309–315), prepara i dati (righe 337–346), crea l'ottimizzatore AdamW con learning rate 1e-5 (riga 351), applica il decadimento polinomiale (riga 355), attiva l'AMP (riga 394), calcola la perdita L1 con eventuale peso sulle etichette (righe 454–462) e la perdita contrastiva (righe 466–481), salva i pesi (righe 508–533).
 
-Il nome del file di output contiene tutti i parametri: `{prefisso}_seed{seed}_size{X}x{Y}x{Z}_spacing{sx}x{sy}x{sz}_{timestamp}_rank{r}_modality{m}.nii.gz`.
+**Parametri da terminale**: quelli di `diff_model_train.py`, senza `--no_amp`.
 
-**CLI**: `-e`, `-c`, `-t` obbligatori; `-g`, `--low-vram`, `--version` (se presente scarica i pesi).
+**Che cosa legge**: il modello principale (obbligatorio), eventuali pesi precedenti, la lista dei dati, `modality_mapping.json`, i file NIfTI.
 
-### 6.16 `download_model_data.py` (206 righe): download dei pesi
+**Che cosa scrive**: `{nome_esperimento}_current.pt` (l'ultimo stato), `{nome_esperimento}_best.pt` (il migliore) e i log per TensorBoard.
 
-Scarica i file da Hugging Face Hub con `hf_hub_download`.
+**Attenzione**: il caricatore di validazione viene **buttato via** (riga 337: `train_loader, _ = ...`). Quindi non c'è nessuna misura di come va su dati nuovi.
 
-- `rflow-mr-brain`: `models/autoencoder_v1.pt` (repo `nvidia/NV-Generate-CT`), `models/diff_unet_3d_rflow-mr-brain_v1.pt` (repo `nvidia/NV-Generate-MR-Brain`).
-- `ddpm-ct` e `rflow-ct`: autoencoder, modello di maschere v2 e relativo autoencoder, UNet dell'immagine, ControlNet. Senza `--model_only` scarica anche il database delle maschere (zip) e il JSON dei candidati e delle dimensioni anatomiche.
-- `rflow-mr`: `autoencoder_v2.pt` e `diff_unet_3d_rflow-mr.pt` (repo `nvidia/NV-Generate-MR`).
+### 6.14 `diff_model_create_training_data.py` (287 righe): preparare gli embedding
 
-**Attenzione**: `--root_dir` sposta **solo** i dataset. I modelli finiscono sempre in `./models/` relativo alla cartella da cui lanci il comando. Non ci sono `--token` o `--overwrite`, anche se alcune skill li descrivono.
+**Scopo.** Prende le immagini reali e le comprime con il VAE, ottenendo un file `<nome>_emb.nii.gz` per ciascuna. È il primo passo prima di `diff_model_train.py`.
 
-### 6.17 `adagn_unet.py` (131 righe): la UNet per le maschere (v2)
+**Funzioni principali**:
+- `create_transforms` (righe 33–74): carica l'immagine, la orienta in modo standard (RAS), applica la normalizzazione dell'intensità, eventualmente ridimensiona.
+- `round_number` (righe 77–90): arrotonda le dimensioni al multiplo di 128 più vicino.
+- `process_file` (righe 110–195): comprime con una finestra scorrevole di 320×320×160 e una sovrapposizione del 40%. Salva la media della distribuzione compressa (`z_mu`), che è la versione "centrale" dell'embedding. Se un file dà errore, lo registra e passa al successivo.
+- `diff_model_create_training_data` (righe 198–263): carica il VAE e distribuisce i lavori tra le schede in modo alternato (round robin).
 
-Definisce `DiffusionModelUNetMaisiAdaGN`, una sottoclasse della UNet MONAI che usa **AdaGN**: invece di sommare il tempo al blocco residuale, genera una coppia (scala, spostamento) e applica `GroupNorm(h)·(1+scala) + spostamento`. Il vettore di condizione di 19 valori passa per un piccolo MLP (19→256→256). Questo è il modo in cui la maschera di Path A è condizionata dalle dimensioni richieste.
+**Che cosa scrive**: `<percorso>_emb.nii.gz`. **Non scrive il file accompagnatore JSON** richiesto da `diff_model_train.py`.
 
-### 6.18 `transforms.py` (310 righe): trasformazioni per il VAE e i dati
+**Parametri**: `-e`, `-c`, `-t` (default inesistenti), `-g`.
 
-- `define_fixed_intensity_transform`: per la CT, intensità da `[−1000, 1000]` a `[0, 1]` con clip. Per MR, percentili 0–99.5 senza clip.
-- `define_random_intensity_transform`: solo per MR. Campo di bias (p 0.3), artefatti Gibbs (0.3), contrasto (0.3), spostamento dell'istogramma (0.05).
-- `define_vae_transform`: flip, rotazioni, zoom, ritaglio casuale a 64³ per il training del VAE.
-- `VAE_Transform`: pipeline per CT e MR, scelta in base a `img["class"]`.
+### 6.15 `diff_model_infer.py` (400 righe): creare solo immagini, senza mappa
 
-### 6.19 `utils_plot.py` (195 righe): visualizzazione
+**Scopo.** Crea immagini TC o risonanza usando solo il modello principale, senza maschera. Utile per la risonanza, per esempio.
 
-Funzioni per disegnare slice e volumi 3D. **Nessun file Python lo importa**: lo usano solo i notebook.
+**Funzioni principali**:
+- `set_random_seed` (righe 37–49): fissa il seme.
+- `load_models` (righe 52–82): carica l'autoencoder e il modello, con il fattore di scala dal file dei pesi.
+- `run_inference` (righe 108–248): crea il rumore (righe 146–155), calcola i passi (righe 159–166), applica la CFG sulla modalità con la classe 0 come non condizionata (righe 205–215), decomprime con finestra fissa di 80³ e sovrapposizione 0.4 (righe 222–230). Per la risonanza l'intensità va da 0 a 1000; per la TC da −1000 a 1000 HU (righe 238–247). L'uscita è in formato intero a 16 bit (`int16`).
+- `save_image` (righe 251–275): salva l'immagine con una matrice di posizione costruita dalla spaziatura.
 
-### 6.20 `compute_fid_2-5d_ct.py` (726 righe): calcolo del FID
+Il nome del file contiene tutti i parametri usati: `{prefisso}_seed{seme}_size{X}x{Y}x{Z}_spacing{sx}x{sy}x{sz}_{data-ora}_rank{r}_modality{m}.nii.gz`. Così sai sempre come è stato creato.
 
-Calcola il FID 2.5D su volumi CT, con la CLI `fire`.
+**Parametri**: `-e`, `-c`, `-t` obbligatori; `-g`, `--low-vram`, `--version` (se presente scarica i pesi).
 
-- Usa come estrattore di feature **RadImageNet ResNet-50**, scaricato con `torch.hub` (richiede rete).
-- Calcola le feature su slice centrali, con padding e ricampionamento opzionali.
-- Salva le feature in `.pt`. I valori FID vengono solo scritti nel log.
+### 6.16 `download_model_data.py` (206 righe): scaricare i pesi
+
+**Scopo.** Scarica i file dei modelli da Hugging Face, il sito dove sono pubblicati.
+
+**Che cosa scarica, per versione**:
+- `rflow-mr-brain`: l'autoencoder (dal repo `nvidia/NV-Generate-CT`) e il modello principale (`diff_unet_3d_rflow-mr-brain_v1.pt`, dal repo `nvidia/NV-Generate-MR-Brain`).
+- `ddpm-ct` e `rflow-ct`: autoencoder, modello delle maschere e relativo autoencoder, modello principale dell'immagine, ControlNet. Senza `--model_only` scarica anche l'archivio delle maschere (zip) e i file con le dimensioni anatomiche e l'indice dei candidati.
+- `rflow-mr`: `autoencoder_v2.pt` e `diff_unet_3d_rflow-mr.pt` (dal repo `nvidia/NV-Generate-MR`).
+
+Funzioni principali: `ensure_hf_download_tracked` (righe 9–23, avvisa Hugging Face che il file è stato usato), `fetch_to_hf_path_cmd` (righe 26–76, scarica e copia, salta i file già presenti), `download_model_data` (righe 79–188).
+
+**Parametri**: `--version` (default `rflow-ct`), `--root_dir` (default `./`), `--model_only`. Non ci sono `--token` o `--overwrite`, anche se alcune skill li descrivono.
+
+**Attenzione**: `--root_dir` sposta **solo** i dataset. I modelli finiscono sempre in `./models/`, relativo alla cartella da cui lanci il comando.
+
+### 6.17 `adagn_unet.py` (131 righe): il modello per le maschere
+
+Definisce la classe `DiffusionModelUNetMaisiAdaGN`, una versione del modello principale che lavora con la **AdaGN** (*Adaptive Group Normalization*).
+
+Che cosa significa, in parole semplici: a ogni blocco il modello normalmente aggiunge il "tempo" del processo. Qui invece calcola due numeri (una scala e uno spostamento) a partire dal vettore di 19 numeri, e li usa per regolare l'intero blocco. Il risultato è che la richiesta di dimensione entra in ogni parte del modello.
+
+Funzioni:
+- `_adagn_resnet_forward` (righe 12–37): applica scala e spostamento.
+- `__init__` (righe 50–72): crea il piccolo MLP (19 → 256 → 256) che calcola scala e spostamento, e allarga i blocchi.
+- `forward` (righe 107–131): concatena la condizione e la passa al modello. Se il contesto è a tre dimensioni, ne calcola la media.
+
+### 6.18 `transforms.py` (310 righe): le trasformazioni dei dati
+
+- `define_fixed_intensity_transform` (righe 45–71): per la TC, porta i valori da −1000…1000 a 0…1 con taglio. Per la risonanza usa i percentili 0–99.5, senza taglio.
+- `define_random_intensity_transform` (righe 74–101): solo per la risonanza. Aggiunge variazioni casuali: campo di polarizzazione (*bias field*) con probabilità 0.3, artefatti di Gibbs (0.3), contrasto (0.3), spostamento dell'istogramma (0.05).
+- `define_vae_transform` (righe 104–225): trasformazioni per il training del VAE: capovolgimenti, rotazioni di 90 gradi, zoom e rotazioni casuali, ritaglio casuale.
+- `VAE_Transform` (righe 228–310): sceglie la pipeline per TC o risonanza in base al campo `class` del dato.
+
+Il **campo di polarizzazione** è una sfumatura di luminosità che la macchina può produrre. Il **fenomeno di Gibbs** è un tipo di artefatto da ricostruzione.
+
+### 6.19 `utils_plot.py` (195 righe): disegnare i risultati
+
+Funzioni per disegnare fette e volumi 3D: `find_label_center_loc`, `normalize_label_to_uint8`, `visualize_one_slice_in_3d`, `show_image`, `to_shape`, `get_xyz_plot`. **Nessun file Python le importa**: le usano solo i notebook.
+
+### 6.20 `compute_fid_2-5d_ct.py` (726 righe): misurare il FID
+
+Calcola il FID su volumi TC, con una CLI costruita con `fire`.
+
+- Usa come estrattore di caratteristiche la rete **RadImageNet ResNet-50**, scaricata con `torch.hub` (richiede internet la prima volta).
+- Calcola il FID su tre piani (XY, YZ, ZX) e fa la media.
+- Usa solo il 50% centrale delle fette, per non contare quelle vuote.
+- Salva le caratteristiche in file `.pt`. I valori FID vengono solo scritti nel log.
+
+Funzione principale: `main(...)` (riga 368), con dozzine di parametri, tra cui il numero di immagini (`num_images=100`) e la forma target (`512x512x512`).
 
 ### 6.21 `scripts/__init__.py` (10 righe)
 
-Solo l'intestazione di licenza. Serve a rendere `scripts` un package.
+Solo l'intestazione di licenza. Serve a Python per riconoscere la cartella come pacchetto.
 
 ---
 
-## 7. Configurazioni
+## 7. I file di configurazione
 
-### 7.1 Architettura di rete: `config_network_rflow.json`
+I file in `configs/` sono come le impostazioni di un programma: non cambiano il codice, ma dicono come si comporta. Il programma è lo stesso, cambia il comportamento.
 
-**Parametri condivisi**:
-- `spatial_dims=3`, `image_channels=1`, `latent_channels=4`.
-- `include_body_region=false` (true nella versione DDPM).
-- `mask_generation_latent_shape=[4,64,64,64]`: la maschera latente di 64³ corrisponde a 256³ in voxel.
+### 7.1 La rete: `config_network_rflow.json` e `config_network_ddpm.json`
 
-**Autoencoder dell'immagine** (`AutoencoderKlMaisi`): canali `[64,128,256]`, due blocchi residuali per livello, nessuna attenzione, `norm_float16=true`, `num_splits=4` (8 per DDPM).
+**Parametri comuni (rflow)**:
+- `spatial_dims = 3`: il modello lavora in 3D.
+- `image_channels = 1`: l'immagine ha un solo canale (come una scala di grigi).
+- `latent_channels = 4`: nello spazio compresso ci sono 4 canali.
+- `include_body_region = false`: non usa le regioni del corpo (lo fa il DDPM).
+- `mask_generation_latent_shape = [4, 64, 64, 64]`: la maschera compressa di 64³ corrisponde a una maschera di 256³ in voxel.
 
-**UNet dell'immagine** (`DiffusionModelUNetMaisi`): canali `[64,128,256,512]`, attenzione ai livelli 3 e 4 (`[F,F,T,T]`), 32 teste di attenzione ai livelli più profondi, `include_spacing_input=true` (la spaziatura entra come condizione), `num_class_embeds=128` (la modalità). Nel DDPM questa chiave è assente.
+**Autoencoder dell'immagine** (`AutoencoderKlMaisi`, righe 12–38): canali `[64, 128, 256]`, due blocchi residuali per livello, nessuna attenzione, precisione a 16 bit per la normalizzazione, `num_splits = 4` (8 per il DDPM). `num_splits` è in quante parti si spezza il calcolo per risparmiare memoria.
 
-**ControlNet** (`ControlNetMaisi`): stessi canali. Il condizionamento della maschera ha 8 canali in ingresso (la maschera binarizzata), con canali intermedi `[8, 32, 64]`.
+**Modello principale dell'immagine** (`DiffusionModelUNetMaisi`, righe 39–65): canali `[64, 128, 256, 512]`. L'attenzione (il meccanismo che confronta le parti dell'immagine tra loro) è attiva solo ai due livelli più profondi (`[F, F, T, T]`), con 32 teste. Usa `include_spacing_input = true` (la spaziatura entra come condizione), `num_class_embeds = 128` (la modalità). Nel DDPM queste ultime due chiavi non ci sono.
 
-**Autoencoder delle maschere**: 8 canali in ingresso (maschera binarizzata), **125 canali in uscita** (le classi del modello di maschere), canali `[32,64,128]`, `use_checkpointing=true`.
+**ControlNet** (`ControlNetMaisi`, righe 66–90): stessi canali. Riceve 8 canali di maschera binarizzata, con canali intermedi `[8, 32, 64]`.
 
-**UNet delle maschere**: la classe `DiffusionModelUNetMaisiAdaGN` del file `adagn_unet.py`, con `cross_attention_dim=19` e `adagn_condition_dim=19`.
+**Autoencoder delle maschere** (righe 91–118): riceve 8 canali di maschera e produce **125 canali**, cioè le 125 classi del modello di maschere. Canali `[32, 64, 128]`, `use_checkpointing = true` (risparmia memoria ricalcolando alcuni passaggi invece di memorizzarli).
 
-**Scheduler**: RFlow con 1000 timestep di training, campionamento uniforme e `scale=1.4` per l'immagine, `scale=1.0` per le maschere.
+**Modello delle maschere** (righe 119–138): la classe `DiffusionModelUNetMaisiAdaGN`, con `cross_attention_dim = 19` e `adagn_condition_dim = 19`.
 
-**Attenzione**: `mask_generation_scale_factor` è scritto nel file ma **non viene mai letto**: il codice usa il valore salvato nel checkpoint.
+**Scheduler** (righe 140–155): il RFlow ha 1000 passi di riferimento durante l'addestramento, campionamento uniforme, e `scale = 1.4` per l'immagine, `scale = 1.0` per la maschera.
 
-### 7.2 Inferenza: `config_infer.json` (pipeline completa)
+**Attenzione**: `mask_generation_scale_factor` è scritto nel file, ma **non viene mai letto**. Il codice usa il valore salvato nel file dei pesi.
 
-| Chiave | Valore | Note |
+### 7.2 La creazione: `config_infer.json` e le varianti per GPU
+
+Il file di base `config_infer.json`:
+
+| Chiave | Valore | Significato |
 |---|---|---|
-| `num_output_samples` | 1 | Numero di coppie generate |
-| `body_region` | `["chest"]` | Solo Path B |
-| `anatomy_list` | `["lung tumor"]` | Solo Path B |
-| `controllable_anatomy_size` | `[]` | Se non vuoto si va in Path A |
-| `controllable_demographics` | `null` | |
-| `num_inference_steps` | 30 | Passi RFlow per l'immagine (il DDPM ne richiede 1000) |
+| `num_output_samples` | 1 | Quante coppie creare |
+| `body_region` | `["chest"]` | Solo Percorso B |
+| `anatomy_list` | `["lung tumor"]` | Solo Percorso B: le strutture richieste |
+| `controllable_anatomy_size` | `[]` | Se non è vuoto, si va in Percorso A |
+| `controllable_demographics` | `null` | Dati del paziente (età, sesso…) |
+| `num_inference_steps` | 30 | Passi del RFlow per l'immagine (il DDPM ne vuole 1000) |
 | `mask_generation_num_inference_steps` | 100 | Passi per la maschera |
 | `mask_generation_cfg_guidance_scale` | 2.0 | CFG per la maschera |
-| `output_size` | `[256,256,256]` | |
-| `spacing` | `[1.5,1.5,2.0]` | mm |
-| `autoencoder_sliding_window_infer_size` | `[48,48,48]` | |
-| `autoencoder_sliding_window_infer_overlap` | 0.6666 | |
-| `modality` | 1 | CT |
-| `cfg_guidance_scale` | 0.0 | CFG per l'immagine (con tumore) |
+| `output_size` | `[256, 256, 256]` | Dimensione finale in voxel |
+| `spacing` | `[1.5, 1.5, 2.0]` | Spaziatura in mm |
+| `autoencoder_sliding_window_infer_size` | `[48, 48, 48]` | Dimensione dei blocchi per la decompressione |
+| `autoencoder_sliding_window_infer_overlap` | 0.6666 | Quanto si sovrappongono i blocchi |
+| `modality` | 1 | TC |
+| `cfg_guidance_scale` | 0.0 | CFG per l'immagine con tumore |
 
-**Preset per GPU** (`config_infer_<GB>g_<X>x<Y>x<Z>.json`). Scelti in base alla memoria:
+**Varianti per GPU** (`config_infer_<GB>g_<X>x<Y>x<Z>.json`). Ogni variante è pensata per una quantità di memoria della scheda grafica:
 
-| File | `output_size` | `spacing` | Finestra | Overlap | Split TP | Passi |
+| File | Dimensione | Spaziatura | Finestra | Sovrapposizione | Parti | Passi |
 |---|---|---|---|---|---|---|
-| `16g_256x256x128` | 256,256,128 | 1.5,1.5,4.0 | 96,96,96 | 0.25 | 2 | 30 |
-| `16g_256x256x256` | 256,256,256 | 1.5,1.5,2.0 | 48,48,64 | 0.6666 | 4 | 30 |
-| `16g_512x512x128` | 512,512,128 | 0.75,0.75,4.0 | 64,64,32 | 0.5 | 2 | 30 |
-| `24g_256x256x256` | 256,256,256 | 1.5,1.5,2.0 | 64,64,64 | 0.25 | 4 | **1000** |
-| `24g_512x512x128` | 512,512,128 | 0.75,0.75,4.0 | 80,80,32 | 0.4 | 2 | 30 |
-| `24g_512x512x512` | 512,512,512 | 0.75,0.75,1.0 | 64,64,48 | 0.4 | 2 | 30 |
-| `32g_512x512x512` | 512,512,512 | 0.75,0.75,1.0 | 80,80,48 | 0.4 | 4 | 30 |
-| `80g_512x512x512` | 512,512,512 | 0.75,0.75,1.0 | 80,80,80 | 0.4 | 4 | **1000** |
-| `80g_512x512x768` | 512,512,768 | 0.75,0.75,0.66667 | 80,80,96 | 0.4 | 4 | 30 |
+| `16g_256x256x128` | 256, 256, 128 | 1.5, 1.5, 4.0 | 96, 96, 96 | 0.25 | 2 | 30 |
+| `16g_256x256x256` | 256, 256, 256 | 1.5, 1.5, 2.0 | 48, 48, 64 | 0.6666 | 4 | 30 |
+| `16g_512x512x128` | 512, 512, 128 | 0.75, 0.75, 4.0 | 64, 64, 32 | 0.5 | 2 | 30 |
+| `24g_256x256x256` | 256, 256, 256 | 1.5, 1.5, 2.0 | 64, 64, 64 | 0.25 | 4 | **1000** |
+| `24g_512x512x128` | 512, 512, 128 | 0.75, 0.75, 4.0 | 80, 80, 32 | 0.4 | 2 | 30 |
+| `24g_512x512x512` | 512, 512, 512 | 0.75, 0.75, 1.0 | 64, 64, 48 | 0.4 | 2 | 30 |
+| `32g_512x512x512` | 512, 512, 512 | 0.75, 0.75, 1.0 | 80, 80, 48 | 0.4 | 4 | 30 |
+| `80g_512x512x512` | 512, 512, 512 | 0.75, 0.75, 1.0 | 80, 80, 80 | 0.4 | 4 | **1000** |
+| `80g_512x512x768` | 512, 512, 768 | 0.75, 0.75, 0.66667 | 80, 80, 96 | 0.4 | 4 | 30 |
 
-Due preset RFlow usano 1000 passi mentre gli altri ne usano 30. Sembra un errore di copia, ma non è verificato.
+Due preset RFlow usano 1000 passi invece di 30. Sembra un errore di copia, ma non è verificato.
 
-**`config_trt.json`**: sostituisce ControlNet, UNet, decoder dell'autoencoder e modelli delle maschere con versioni compilate con TensorRT. Richiede CUDA.
+Il file **`config_trt.json`** sostituisce ControlNet, UNet, decoder e modelli delle maschere con versioni compilate con TensorRT, un motore di NVIDIA che accelera i calcoli. Richiede una GPU CUDA.
 
-### 7.3 Diffusione: `config_maisi_diff_model_<variante>.json`
+### 7.3 L'addestramento della diffusione: `config_maisi_diff_model_<variante>.json`
 
-| Variante | `dim` | `spacing` | Passi | Modalità | CFG | Seme | Batch | lr | Epoch |
+| Variante | Dimensione (`dim`) | Spaziatura | Passi | Modalità | CFG | Seme | Batch | Learning rate | Epoch |
 |---|---|---|---|---|---|---|---|---|---|
-| `rflow-ct` | 256,256,128 | 1.7,1.7,2 | 30 | 1 | 0 | 0 | 2 | 1e-5 | 1000 |
-| `ddpm-ct` | 256,256,128 | 1.0,1.0,0.75 | 1000 | 1 | 0 | 0 | 1 | 1e-5 | 1000 |
-| `rflow-mr` | 128,256,256 | 1.25,1.0,1.0 | 30 | 9 | **15** | 0 | 1 | 1e-5 | 1000 |
-| `rflow-mr-brain` | 256,256,128 | 0.94,0.94,1.36 | 30 | 9 | **2** | 1234 | 1 | 1e-5 | 1000 |
+| `rflow-ct` | 256, 256, 128 | 1.7, 1.7, 2 | 30 | 1 | 0 | 0 | 2 | 1e-5 | 1000 |
+| `ddpm-ct` | 256, 256, 128 | 1.0, 1.0, 0.75 | 1000 | 1 | 0 | 0 | 1 | 1e-5 | 1000 |
+| `rflow-mr` | 128, 256, 256 | 1.25, 1.0, 1.0 | 30 | 9 | **15** | 0 | 1 | 1e-5 | 1000 |
+| `rflow-mr-brain` | 256, 256, 128 | 0.94, 0.94, 1.36 | 30 | 9 | **2** | 1234 | 1 | 1e-5 | 1000 |
 
-Tutte le varianti hanno gli one-hot delle regioni (`[0,1,0,0]` e `[0,0,1,0]`), ma solo `ddpm-ct` li usa.
+Tutte le varianti hanno gli indicatori delle regioni (`[0,1,0,0]` e `[0,0,1,0]`), ma solo `ddpm-ct` li usa.
 
-### 7.4 Training del ControlNet: `config_maisi_controlnet_train*.json`
+### 7.4 L'addestramento del ControlNet: `config_maisi_controlnet_train*.json`
 
-| File | Training | Inferenza |
+| File | Addestramento | Creazione |
 |---|---|---|
-| generico | batch 1, fold 0, lr 1e-5, 100 epoch, `weighted_loss_label=[129]`, `weighted_loss=100` | 10 passi, finestra `[80,80,80]`, overlap 0.4, modalità 1 |
-| `rflow-ct` | come sopra, `weighted_loss_label=[23]`, perdita contrastiva attiva (δ=2, w=0.01) | 30 passi, `[80,80,80]`, 0.4, modalità 1 |
-| `ddpm-ct` | `weighted_loss_label=[129]`, senza contrastiva | 1000 passi, `[80,80,80]`, 0.4, modalità 1 |
-| `rflow-mr` | `weighted_loss_label=[129]`, senza contrastiva | 30 passi, `[80,80,32]`, 0.4, modalità 9 |
+| generico | batch 1, fold 0, lr 1e-5, 100 epoch, `weighted_loss_label = [129]`, `weighted_loss = 100` | 10 passi, finestra `[80,80,80]`, sovrapposizione 0.4, modalità 1 |
+| `rflow-ct` | come sopra, ma `weighted_loss_label = [23]` e perdita contrastiva attiva (δ = 2, peso 0.01) | 30 passi, `[80,80,80]`, 0.4, modalità 1 |
+| `ddpm-ct` | `weighted_loss_label = [129]`, senza perdita contrastiva | 1000 passi, `[80,80,80]`, 0.4, modalità 1 |
+| `rflow-mr` | `weighted_loss_label = [129]`, senza perdita contrastiva | 30 passi, `[80,80,32]`, 0.4, modalità 9 |
 
-Il file `rflow-mr` esiste, ma la documentazione dice che non c'è un ControlNet per la MR. Il suo ambiente punta a `temp_work_dir/...` (un esempio con tumore cerebrale), quindi sembra uno scaffold, non una configurazione pronta.
+Il `weighted_loss_label` è l'etichetta a cui dare più peso nella perdita: il valore 129 corrisponde alla lesione (un numero della lista). Il `weighted_loss` è il peso.
 
-### 7.5 Training del VAE: `config_maisi_vae_train.json`
+Il file `rflow-mr` esiste, ma la documentazione dice che non c'è un ControlNet per la risonanza. Il suo ambiente punta a `temp_work_dir/...` (un esempio cerebrale), quindi sembra uno scheletro, non una configurazione pronta.
 
-- Dati: `random_aug=true`, zoom casuale, `select_channel=0`.
-- Autoencoder: batch 1, patch `[64,64,64]`, validazione `[96,96,64]`, lr 1e-4, peso perceptuale 0.3, peso KL 1e-7, peso avversariale 0.1, perdita L1, validazione ogni 10 epoch, AMP.
-- **`n_epochs=1`**: è un valore dimostrativo. La documentazione dice che il modello rilasciato ha 280 epoch.
+### 7.5 L'addestramento del VAE: `config_maisi_vae_train.json`
 
-### 7.6 File di ambiente
+- **Dati**: `random_aug = true` (variazioni casuali), `spacing_type = "rand_zoom"` (zoom casuale), `select_channel = 0`.
+- **Autoencoder**: batch 1, ritagli di `[64, 64, 64]`, validazione con finestra `[96, 96, 64]`, learning rate 1e-4, peso perceptuale 0.3, peso KL 1e-7, peso avversariale 0.1, perdita L1, validazione ogni 10 epoch, AMP attivo.
+- **`n_epochs = 1`**: è un valore dimostrativo. La documentazione dice che il modello rilasciato ha avuto 280 epoch.
 
-Un file `environment_*.json` dice **quali pesi** usare e **dove** trovarli. Ogni coppia di configurazione deve puntare a pesi compatibili.
+Il **peso perceptuale** confronta le immagini secondo caratteristiche "visive" e non solo punto per punto. Il **peso avversariale** usa un discriminatore, cioè una rete che cerca di distinguere immagini vere da finte.
 
-| File | Contenuto chiave | Note |
+### 7.6 I file di ambiente: `environment_*.json`
+
+Un file di ambiente dice **quali pesi** usare e **dove** trovarli. La coppia "rete + ambiente" deve essere della stessa famiglia, altrimenti il programma non trova i file giusti.
+
+| File | Contenuto principale | Note |
 |---|---|---|
-| `environment_rflow-ct.json` | AE v1, DM rflow-ct, ControlNet rflow-ct, AE e DM delle maschere v2, zip delle maschere, JSON candidati (4000), dimensioni anatomiche, dizionari | Pipeline CT completa |
-| `environment_ddpm-ct.json` | Come sopra con 3000 candidati | Un segmento `configs/` in più in una chiave che non viene mai letta |
-| `environment_rflow-mr.json` | AE v2, DM rflow-mr, `trained_controlnet_path=null`, percorsi maschere `null` | **Rompe `inference.py:105`** (vedi sezione 11) |
-| `environment_maisi_diff_model_rflow-ct.json` | AE v1, `diff_unet_3d_rflow-ct.pt`, `modality_mapping_path` | `json_data_list=./dataset.json`, file assente |
-| `environment_maisi_diff_model_rflow-mr-brain.json` | AE v1 (riusa l'autoencoder CT), `diff_unet_3d_rflow-mr-brain_v1.pt` | Coerente con il download |
-| `environment_maisi_diff_model_ddpm-ct.json` | `diff_unet_3d_ddpm-ct.pt`, **senza** `modality_mapping_path` | Coerente: il DDPM non ha embedding di classe |
-| `environment_maisi_controlnet_train_rflow-ct.json` | AE v1, DM rflow-ct, `existing_ckpt_filepath`, `exp_name=controlnet_kits_finetune`, sottoinsieme KiTS | Esempio di fine-tuning |
-| `environment_maisi_controlnet_train_rflow-mr.json` | Esempio cerebrale sotto `temp_work_dir` | Scaffold |
-| `environment_maisi_controlnet_train.json` | Chiavi legacy (`trained_controlnet_path`, `autoencoder_epoch273.pt`) | Alcune chiavi ignorate dal trainer |
+| `environment_rflow-ct.json` | AE v1, DM rflow-ct, ControlNet rflow-ct, AE e DM delle maschere v2, zip delle maschere, JSON dei candidati (4000), dimensioni anatomiche, dizionari | Pipeline TC completa |
+| `environment_ddpm-ct.json` | Come sopra, con 3000 candidati | Ha un segmento `configs/` in più in una chiave che non viene mai letta |
+| `environment_rflow-mr.json` | AE v2, DM rflow-mr, `trained_controlnet_path = null`, percorsi delle maschere `null` | **Rompe `inference.py`, riga 105** (vedi [sezione 11](#11-problemi-noti)) |
+| `environment_maisi_diff_model_rflow-ct.json` | AE v1, `diff_unet_3d_rflow-ct.pt`, `modality_mapping_path` | `json_data_list = ./dataset.json`, file assente |
+| `environment_maisi_diff_model_rflow-mr.json` | AE v2, `diff_unet_3d_rflow-mr.pt` | |
+| `environment_maisi_diff_model_rflow-mr-brain.json` | AE v1 (riusa l'autoencoder TC), `diff_unet_3d_rflow-mr-brain_v1.pt` | Coerente con il download |
+| `environment_maisi_diff_model_ddpm-ct.json` | `diff_unet_3d_ddpm-ct.pt`, **senza** `modality_mapping_path` | Coerente: il DDPM non ha la modalità |
+| `environment_maisi_controlnet_train_rflow-ct.json` | AE v1, DM rflow-ct, `existing_ckpt_filepath`, `exp_name = controlnet_kits_finetune`, sottoinsieme KiTS | Esempio di fine-tuning |
+| `environment_maisi_controlnet_train_ddpm-ct.json` | Simile, per il DDPM | |
+| `environment_maisi_controlnet_train_rflow-mr.json` | Esempio cerebrale in `temp_work_dir` | Scheletro |
+| `environment_maisi_controlnet_train.json` | Chiavi vecchie (`trained_controlnet_path`, `autoencoder_epoch273.pt`) | Il trainer ignora alcune chiavi |
 
-### 7.7 Mappatura delle modalità: `modality_mapping.json`
+### 7.7 La modalità: `modality_mapping.json`
 
-Il numero della modalità va alla UNet e al ControlNet come `class_labels`. Valori principali:
+Ogni tipo di scansione ha un numero, che viene dato al modello come istruzione:
 
-- `unknown 0` (**è anche il token "nullo" per la CFG**)
-- CT: `ct 1`, `ct_wo_contrast 2`, `ct_contrast 3`
-- MR: `mri 8`, `mri_t1 9`, `mri_t2 10`, `mri_flair 11`, `mri_pd 12`, `mri_dwi 13`, `mri_adc 14`, `mri_ssfp 15`, `mri_mra 16`, `mri_t1c 17`, `mri_swi 20`
-- MR skull-stripped: `mri_t1 29`, `mri_t2 30`, `mri_flair 31`, `mri_swi 32`, `mri_mra 33`
+- `unknown` = 0 (**è anche la "classe nulla" per la CFG**)
+- TC: `ct` = 1, `ct_wo_contrast` = 2, `ct_contrast` = 3
+- Risonanza: `mri` = 8, `mri_t1` = 9, `mri_t2` = 10, `mri_flair` = 11, `mri_pd` = 12, `mri_dwi` = 13, `mri_adc` = 14, `mri_ssfp` = 15, `mri_mra` = 16, `mri_t1c` = 17, `mri_swi` = 20
+- Risonanza senza cranio (*skull-stripped*): `mri_t1` = 29, `mri_t2` = 30, `mri_flair` = 31, `mri_swi` = 32, `mri_mra` = 33
 
-Regola: **modalità ≤ 7 è CT**, altrimenti MR. I codici 4–7 non hanno nome ma sono trattati come CT. I codici 18–19 e 21–28 non esistono.
+**Regole**:
+- Numeri da 1 a 7 = TC; da 8 in su = risonanza.
+- I codici 4–7 non hanno un nome ma sono trattati come TC.
+- I codici 18–19 e 21–28 non esistono.
+- Il numero viene usato in tre posti: nei dataloader (traduce il testo in numero), nella UNet e nel ControlNet come `class_labels` (la classe della modalità), e per decidere se l'immagine è TC o risonanza.
 
-Per il tuo progetto: le sequenze T1, T2 e FLAIR corrispondono ai codici 9, 10 e 11 (o 29, 30, 31 se skull-stripped).
+Per il tuo progetto: T1 è 9 (o 29 senza cranio), T2 è 10 (o 30), FLAIR è 11 (o 31).
 
-### 7.8 Statistiche di intensità: `image_median_statistics_ct.json`
+### 7.8 Le statistiche dei tessuti: `image_median_statistics_ct.json`
 
-Sette gruppi (fegato, milza, pancreas, rene, polmone, osso, cervello). Per ogni gruppo: `min_median`, `max_median`, percentili 0.5 e 99.5, sigma 6 e 12 bassi e alti. Usati da `quality_check.is_outlier`.
+Sette gruppi (fegato, milza, pancreas, rene, polmone, osso, cervello). Per ogni gruppo: valore minimo e massimo della mediana, percentili 0.5 e 99.5, sigma 6 e 12 sopra e sotto. Sono i valori di riferimento per `quality_check.py`.
 
-Il file delle dimensioni anatomiche (`all_anatomy_size_conditions.json`) viene **scaricato ma mai letto**. Il significato della scala [0,1] della dimensione non è definito nel repo.
+Esempio: per il fegato `sigma_6_low = −21.6`, `sigma_6_high = 156.3`, `percentile_0_5 = 9.5`, `percentile_99_5 = 162.0`.
+
+Il file con le dimensioni anatomiche (`all_anatomy_size_conditions.json`) viene **scaricato ma mai letto**. Non è definito nel progetto che cosa significhi la scala tra 0 e 1 delle dimensioni.
 
 ---
 
-## 8. Dizionari delle etichette
+## 8. Le etichette delle strutture
 
-### 8.1 `label_dict.json`: vocabolario di 132 classi
+### 8.1 `label_dict.json`: il vocabolario di 132 strutture
 
-È il dizionario che usa **il codice**. Esempi: fegato 1, milza 3, pancreas 4, rene destro 5, aorta 6, stomaco 12, duodeno 13, rene sinistro 14, cervello 22, tumore polmonare 23, tumore pancreatico 24, vasi epatici 25, tumore epatico 26, tumore del colon 27, lobi polmonari 28–32, vertebre 33–56 e S1 127, trachea 57, colon 62, costole 63–86, cranio 120, lesione ossea 128, vie aeree 132, corpo 200.
+È il dizionario che il codice usa davvero. Esempi:
 
-Gli slot 2, 16, 18, 20, 21, 129, 130, 131 sono segnaposto `dummy1`–`dummy8`, cioè **classi libere** per il fine-tuning. Le skill indicano gli intervalli liberi come 133–199 e 201–255.
+| Numero | Struttura | Numero | Struttura |
+|---|---|---|---|
+| 1 | fegato | 23 | tumore del polmone |
+| 3 | milza | 24 | tumore del pancreas |
+| 4 | pancreas | 26 | tumore del fegato |
+| 5 | rene destro | 27 | tumore del colon |
+| 6 | aorta | 57 | trachea |
+| 12 | stomaco | 62 | colon |
+| 13 | duodeno | 63–86 | costole |
+| 14 | rene sinistro | 120 | cranio |
+| 22 | cervello | 128 | lesione ossea |
+| 25 | vasi epatici | 132 | vie aeree |
+| 28–32 | lobi polmonari | 200 | corpo |
+| 33–56 | vertebre (e S1 = 127) | | |
 
-**Attenzione**: `lung` non è una chiave. Ci sono solo i lobi. Il nome `lung` è accettato solo come slot di condizione in Path A.
+I numeri **2, 16, 18, 20, 21, 129, 130, 131** sono segnaposto (`dummy1`–`dummy8`): il modello li ha lasciati liberi. Anche 133–199 e 201–255 sono liberi, e servono per aggiungere strutture nuove durante il fine-tuning.
 
-### 8.2 `label_dict_124_to_132.json`: dall'output dell'autoencoder delle maschere alle etichette MAISI
+**Attenzione**: la parola `lung` non è una chiave del dizionario. Ci sono solo i nomi dei singoli lobi. Il nome `lung` è accettato solo come condizione in Percorso A.
 
-Il modello di maschere produce 125 canali (indici 0–124). Questo file li mappa alle etichette di `label_dict.json`. Esempi: fegato `[1,1]`, milza `[2,3]`, pancreas `[3,4]`, rene destro `[4,5]`, vie aeree `[123,132]`, corpo `[124,200]`.
+Il dizionario viene usato in: `LDMSampler` (`sample.py`, riga 126), i controllori (`sample_mask.py`, righe 341–345 e 395–399), `find_masks.py` (riga 107), e le etichette di tentativo in Percorso A (`sample.py`, righe 159–161).
 
-Perché è importante: se dai al ControlNet un'etichetta tra 0 e 124 senza rimappatura, l'effetto è sbagliato. La skill di immagine da maschera avverte di questo.
+### 8.2 `label_dict_124_to_132.json`: dal modello delle maschere alle 132 strutture
+
+Il modello delle maschere produce numeri da 0 a 124 (125 canali). Questo file li traduce nelle etichette del dizionario principale. Il formato è `{nome: [origine, destinazione]}`:
+
+- fegato `[1, 1]`
+- milza `[2, 3]`
+- pancreas `[3, 4]`
+- rene destro `[4, 5]`
+- vie aeree `[123, 132]`
+- corpo `[124, 200]`
+- sfondo `[0, 0]`
+
+Viene applicato da `remap_labels` (`utils.py`, righe 51–56) in `sample_mask.py` (riga 175). Per questo la skill di immagine dalla maschera avverte di non dare al ControlNet etichette tra 0 e 124 senza traduzione.
 
 ### 8.3 `label_dict_124_to_132_ctmr.json`
 
-Identico al precedente, ma il corpo va a **500** invece di 200. Nessun file Python lo carica.
+Identico al precedente, ma il corpo va a **500** invece di 200 (riga 500). **Nessun file Python lo carica.**
 
-### 8.4 `label_dict_ctmr.json`: il dizionario "alternativo"
+### 8.4 `label_dict_ctmr.json`: un vocabolario alternativo
 
-Un altro vocabolario, con nomi diversi: rene 2, polmone 20, osso 21, cervello 22, retto 18, prostata o utero (deprecato) 16, corpo 500, vie aeree 132.
+Un altro elenco, con nomi diversi: rene 2, polmone 20, osso 21, cervello 22, retto 18, prostata o utero (deprecato) 16, corpo 500, vie aeree 132, e segnaposto 6, 7, 8 a 129–131. Ha le chiavi `lung` e `bone`.
 
-**Nessun file Python lo carica.** Questo risolve parzialmente la domanda aperta del tuo `RIASSUNTO_PROGETTO.md`: il codice usa `label_dict.json` (132 classi) per il modello di maschere. Il tumore cerebrale nel codice non è una classe di `label_dict.json`, perché lì il cervello è 22 e il tumore non c'è. Quindi per il tuo progetto la classe da usare va scelta con attenzione (vedi [sezione 13](#13-cosa-significa-tutto-questo-per-il-tuo-progetto)).
+**Nessun file Python lo carica.** Quindi il "brain tumor" 176 presente qui non serve al codice attuale. Questo chiarisce parzialmente la domanda aperta del tuo `RIASSUNTO_PROGETTO.md`: il codice usa `label_dict.json` (132 classi) per il modello delle maschere.
 
-### 8.5 Etichette hard-coded nel codice
+### 8.5 Le etichette scritte nel codice
 
-- Etichette tumorali `[23, 24, 26, 27, 128]`: in `find_masks.py`, `sample_mask.py`, `utils.py`.
-- `tumor_organ_dict` in `utils.py`: 23→28, 24→4, 26→1, 27→62, 128→200.
-- Vasi epatici 25 → fegato 1; vie aeree 132 mantenute.
-- Regioni del corpo (`utils.py:399-407`): vedi [sezione 6.7](#67-utilspy-816-righe-post-processing-dataloader-perdite).
-
----
-
-## 9. Flussi end-to-end
-
-### 9.1 Path A: maschera da zero (diffusione)
-
-**Trigger**: `controllable_anatomy_size` o `controllable_demographics` non vuoti.
-
-1. **Condizione** (`sample.py:435-480`): vettore di 19 valori. Gli slot 0–13 valgono −1 di default; l'organo o il tumore richiesto riceve la sua dimensione. Gli slot 14–18 sono età, sesso (M=1, F=0), peso, BMI, altezza, divisi per `_DEMOG_MAX` e limitati a [0,1].
-2. **UNet delle maschere** (`sample_mask.py:78-195`): rumore di forma `[1,4,64,64,64]`, RFlow con 100 passi, CFG 2.0 contro il vettore tutto a −1.
-3. **Decodifica**: a finestra scorrevole con `ReconModel`. Output a 125 canali.
-4. **Discretizzazione**: softmax, argmax, rimappatura con `label_dict_124_to_132.json`.
-5. **Post-processing** (`utils.py:568-695`): raffinamento del corpo, pulizia dei tumori, soppressione di componenti di organi, regole intestinali, riempimenti per chiusura, tumore target ridisegnato, vasi epatici e vie aeree.
-6. **Ripetizione** (`sample.py:282-302`): fino a 5 nuovi tentativi se manca un'etichetta richiesta; poi procede con un avviso.
-7. **Ricampionamento** (`sample.py:487-498`, `:537-580`): spaziatura nearest e `ResizeWithPadOrCrop` su `output_size`. Non verifica che le etichette target siano presenti.
-8. **One-hot delle regioni** calcolate dalla maschera (`utils.py:389-425`).
-9. **Generazione dell'immagine**: vedi [sezione 9.3](#93-immagine-da-maschera-lldm-condizionato-dal-controlnet).
-10. **Salvataggio** della maschera completa a 132 classi (il filtro è solo per Path B).
-
-### 9.2 Path B: maschera reale dal database, con augmentation
-
-**Trigger**: `controllable_anatomy_size` e `controllable_demographics` entrambi vuoti.
-
-1. **Ricerca esatta** con `find_masks(..., True)` (`sample.py:249-257`).
-2. **Ricerca approssimata** se ci sono meno maschere di `num_img` (`sample.py:258-264`, `find_closest_masks` a `:607-667`). Ordina i candidati per FOV, dimensioni e spaziatura. Scarta quelli che richiederebbero più di 128 voxel di sovracampionamento. Tiene i primi `max(2·num_img, 5)` dopo un controllo degli organi.
-3. **Selezione** (`select_mask`, `:371-388`): mescola e cicla. L'augmentation è sempre attiva.
-4. **Lettura** (`read_mask_information`, `:582-605`).
-5. **Ricampionamento** se si è usata la ricerca approssimata (`:313-314`).
-6. **Augmentation** (`augmentation.py:436-481`): in base all'etichetta presente. 128 → osso; 26 → tumore epatico; 23 → tumore polmonare; 24 → tumore pancreatico; 27 → tumore del colon; 401–403 → BraTS. Altrimenti zoom del corpo tra 0.99 e 1.01. Le funzioni per i tumori usano deformazioni elastiche e ripetono finché abbastanza volume rimane nell'organo.
-7. **Generazione dell'immagine** (vedi 9.3).
-8. **Salvataggio** dell'etichetta filtrata sulla lista di anatomia (`sample.py:356-357`).
-
-### 9.3 Immagine da maschera (LDM condizionato dal ControlNet)
-
-Cuore: `run_controlnet_conditioned_image_dm` (`utils_infer.py:118-341`). Wrapper: `ldm_conditional_sample_one_image_from_mask` (`infer_image_from_mask.py:65-165`).
-
-1. **Condizione**: la maschera intera viene binarizzata in 8 canali (`utils.py:173-188`), quindi l'input del ControlNet è `[B, 8, X, Y, Z]`.
-2. **Non condizionata** (solo se CFG > 0): tumori rimossi con `remove_tumors` (`augmentation.py:484-520`), poi binarizzata.
-3. **Rumore** di forma `[1, 4, X/4, Y/4, Z/4]` (`utils_infer.py:211`), timestep RFlow (`:213-217`).
-4. **Per ogni passo** (`:239-294`):
-   - il ControlNet riceve `(x, t, condizione)` più le etichette di classe se il modello le ha; con CFG il batch raddoppia e la metà non condizionata ha classi e maschera azzerate;
-   - la UNet riceve la spaziatura × 100, le eventuali regioni e le classi, più i residui del ControlNet sommati ai blocchi di discesa e al centro;
-   - CFG: `uncond + s·(cond − uncond)` (`:288-289`);
-   - passo dello scheduler (`:291-294`).
-5. **Decodifica** a finestra scorrevole con `ReconModel` (`:310-322`).
-6. **Intensità**: CT limitata a [0,1] e poi mappata a [−1000, 1000] HU; MR limitata sotto e mappata a [0, 1000] (`:326-335`).
-7. **Sfondo**: `crop_img_body_mask` imposta a sfondo i voxel con maschera 0 (`infer_image_from_mask.py:164`, `:173-185`).
-8. **Controllo di qualità** (solo CT, Path A/B): viene registrato, ma **non fa rigenerare** con un solo campione (vedi sezione 11).
-
-### 9.4 Training
-
-**(a) VAE dell'immagine**: non c'è `train_vae.py`. Il training è nel notebook `train_vae_tutorial.ipynb` (letto solo con grep).
-- Dati: trasformazioni `VAE_Transform`, ritagli casuali da 64³, validazione a finestra `[96,96,64]`.
-- Perdita del generatore: L1 + 1e-7·KL + 0.3·perceptuale + 0.1·avversariale (discriminatore PatchDiscriminator).
-- Adam per generatore e discriminatore, lr 1e-4.
-- Output: `autoencoder.pt`, `discriminator.pt`, e per epoca `autoencoder_epoch{N}.pt`.
-
-**(b) Embedding** (`diff_model_create_training_data.py`): i volumi vengono portati a multipli di 128, codificati con il VAE a tile di 320×320×160 e overlap 0.4, salvati come `<nome>_emb.nii.gz`.
-
-**(c) UNet dell'immagine** (`diff_model_train.py`): input gli embedding e il file JSON laterale. Le immagini vengono moltiplicate per lo scale factor (1/std del primo batch). Con probabilità 10% la modalità diventa 0 (classe nulla per la CFG). Target `immagini − rumore` per RFlow. L1, Adam, `PolynomialLR`, AMP. Un checkpoint per epoca con lo scale factor incluso.
-
-**(d) ControlNet** (`train_controlnet.py`): UNet congelata (`:317-318`). Il ControlNet parte dai pesi della UNet (`:307`) o da `existing_ckpt_filepath`. Perdita L1 sull'output della UNet, con pesi per l'etichetta `weighted_loss_label` e perdita contrastiva opzionale (`:454-481`). AdamW lr 1e-5, `PolynomialLR`. **Nessuna validazione.** Salva `_current.pt` e `_best.pt`.
-
-### 9.5 Generazione di sole immagini
-
-`diff_model_infer.py`: rumore, denoising della UNet con CFG sulla modalità (classe 0 come non condizionata), decodifica dell'autoencoder con ROI fisso `[80,80,80]`, output `int16`. **Senza ControlNet**, quindi senza condizione di maschera.
+- **Etichette tumorali** `[23, 24, 26, 27, 128]`: in `find_masks.py` (riga 126), `sample_mask.py` (riga 181), `utils.py` (riga 594).
+- **`tumor_organ_dict`** in `utils.py` (riga 594): 23→28, 24→4, 26→1, 27→62, 128→200. Dice quale organo "ospita" ciascun tumore.
+- **Vasi epatici 25** → fegato 1 (`utils.py`, riga 690). **Vie aeree 132** restano (riga 691).
+- **Regioni del corpo** (`utils.py`, righe 399–407): testa, torace, addome, bacino, come visto nella sezione 6.7.
+- **Dimensioni per il Percorso A** (`sample_mask.py`, righe 57–72): come visto nella sezione 6.5.
 
 ---
 
-## 10. Come usarlo in pratica
+## 9. Il percorso di un'immagine, passo per passo
 
-### 10.1 Setup
+### 9.1 Percorso A: mappa creata da zero (diffusione)
+
+**Quando si usa**: se `controllable_anatomy_size` o `controllable_demographics` non sono vuoti (`sample.py`, riga 236).
+
+1. **Preparare la condizione** (`sample.py`, righe 435–480): si costruisce un vettore di 19 numeri. Gli slot 0–13 valgono −1 di default; l'organo o il tumore richiesto riceve la sua dimensione (righe 460–465). Gli slot 14–18 sono età, sesso (maschio = 1, femmina = 0), peso, BMI e altezza, divisi per i valori massimi e limitati tra 0 e 1 (righe 467–476).
+2. **Generare la maschera con il modello delle maschere** (`sample_mask.py`, righe 78–195): parte da un rumore di forma `[1, 4, 64, 64, 64]`. Il RFlow fa 100 passi. La CFG confronta la predizione con la condizione e quella con il vettore tutto a −1, con peso 2.0.
+3. **Decodificare**: con la finestra scorrevole, usando `ReconModel`. Risultato: 125 canali.
+4. **Scegliere la classe per ogni punto**: softmax (trasforma i valori in probabilità che sommano a 1), poi argmax (sceglie la più probabile), poi la rimappatura con `label_dict_124_to_132.json`.
+5. **Pulire la maschera** (`utils.py`, righe 568–695): sistema il corpo, pulisce i tumori, elimina componenti di organi troppo piccole o isolate, applica le regole dell'intestino, riempie i buchi per chiusura, ridisegna il tumore target, sistema vasi e vie aeree.
+6. **Riprovare se serve** (`sample.py`, righe 282–302): se manca un'etichetta richiesta, rigenera fino a cinque volte; poi va avanti con un avviso.
+7. **Adattare la dimensione** (`sample.py`, righe 487–498 e 537–580): ricampiona con il metodo "nearest" alla spaziatura richiesta, poi aggiunge o taglia il bordo fino alla dimensione finale. Non controlla che le etichette target siano presenti (riga 499).
+8. **Calcolare le regioni del corpo** dalla maschera (`sample.py`, riga 501; `utils.py`, righe 389–425).
+9. **Creare l'immagine** (vedi [9.3](#93-creare-limmagine-dalla-mappa)).
+10. **Salvare la maschera completa** con le 132 classi. Il filtro si applica solo al Percorso B.
+
+### 9.2 Percorso B: mappa presa dall'archivio, con augmentation
+
+**Quando si usa**: se `controllable_anatomy_size` e `controllable_demographics` sono entrambi vuoti.
+
+1. **Cercare una corrispondenza esatta** con `find_masks(..., True)` (`sample.py`, righe 249–257).
+2. **Se non bastano, cercare quelle più simili** (`sample.py`, righe 258–264; `find_closest_masks` alle righe 607–667). Ordina i candidati per FOV, dimensione e spaziatura. Scarta quelli che richiederebbero più di 128 voxel di ricampionamento. Tiene i primi `max(2·num_img, 5)` dopo il controllo degli organi.
+3. **Scegliere una maschera** (`select_mask`, righe 371–388): mescola e cicla. L'augmentation è sempre attiva.
+4. **Leggere le informazioni** della maschera (`read_mask_information`, righe 582–605).
+5. **Ricampionare** se la maschera è stata presa dalla ricerca approssimata (righe 313–314).
+6. **Applicare l'augmentation** (`augmentation.py`, righe 436–481): in base all'etichetta presente. 128 → osso; 26 → fegato; 23 → polmone; 24 → pancreas; 27 → colon; 401–403 → cervello (BraTS). Se non c'è nessun tumore, zoom del corpo tra 0.99 e 1.01.
+7. **Creare l'immagine** (vedi 9.3).
+8. **Salvare l'etichetta filtrata** sulle strutture richieste (`sample.py`, righe 356–357; `sample_mask.py`, righe 198–215).
+
+### 9.3 Creare l'immagine dalla mappa
+
+Il cuore è `run_controlnet_conditioned_image_dm` (`utils_infer.py`, righe 118–341). Il contenitore che lo chiama è `ldm_conditional_sample_one_image_from_mask` (`infer_image_from_mask.py`, righe 65–165).
+
+1. **Preparare la condizione**: la maschera intera viene trasformata in 8 strati binari (`utils.py`, righe 173–188). Quindi il ControlNet riceve un tensore di forma `[B, 8, X, Y, Z]`. Per questo le etichette arrivano fino a 255.
+2. **Preparare la versione "senza tumore"** (solo se la CFG è maggiore di zero): si rimuovono i tumori (`augmentation.py`, righe 484–520) e si binarizza (`infer_image_from_mask.py`, righe 127–136).
+3. **Creare il rumore** di forma `[1, 4, X/4, Y/4, Z/4]` (`utils_infer.py`, riga 211) e i passi di tempo del RFlow (righe 213–217).
+4. **Per ogni passo** (righe 239–294):
+   - il ControlNet riceve `(x, t, condizione)` più le classi della modalità se il modello le ha; con la CFG il batch raddoppia, e la metà senza condizione ha le classi e la maschera azzerate;
+   - la UNet riceve la spaziatura moltiplicata per 100, le regioni se presenti, le classi, e i residui del ControlNet sommati ai blocchi di discesa e al centro;
+   - la CFG combina le due predizioni: `non_condizionata + s · (condizionata − non_condizionata)` (righe 288–289);
+   - lo scheduler fa il passo successivo (righe 291–294).
+5. **Decomprimere** con la finestra scorrevole e `ReconModel` (righe 310–322).
+6. **Riportare alla scala dei tessuti** (righe 326–335): per la TC il valore viene limitato tra 0 e 1, poi portato tra −1000 e 1000 HU. Per la risonanza viene limitato in basso e portato tra 0 e 1000.
+7. **Azzerare lo sfondo**: `crop_img_body_mask` porta a sfondo i punti con maschera 0 (`infer_image_from_mask.py`, riga 164; righe 173–185).
+8. **Controllo di qualità** (solo TC, Percorsi A e B): viene registrato, ma con un solo campione non fa rigenerare (vedi [sezione 11](#11-problemi-noti)).
+
+### 9.4 Come si addestra il modello
+
+Il training ha quattro parti, da fare in quest'ordine.
+
+**(a) Il VAE dell'immagine.** Non esiste un file `train_vae.py`. Il training è nel notebook `train_vae_tutorial.ipynb`, che ho solo cercato con grep, non letto per intero.
+- Dati: trasformazioni `VAE_Transform` (`transforms.py`, righe 228–310); ritagli casuali di 64³; validazione con finestra `[96, 96, 64]`.
+- Perdita del generatore: L1 + 1e-7 · KL + 0.3 · perdita perceptuale + 0.1 · perdita avversariale. Il discriminatore è un `PatchDiscriminator`, cioè guarda piccole porzioni dell'immagine.
+- Ottimizzatore Adam sia per il generatore sia per il discriminatore, learning rate 1e-4, con riscaldamento iniziale (*warmup*).
+- Output: `model_dir/autoencoder.pt`, `discriminator.pt` e, per epoch, `autoencoder_epoch{N}.pt`.
+
+**(b) Gli embedding** (`diff_model_create_training_data.py`). I volumi vengono portati a multipli di 128 (righe 77–90), codificati con il VAE a blocchi di 320×320×160 con sovrapposizione 0.4 (righe 173–186), e salvati come `<nome>_emb.nii.gz` (righe 190–192). La versione compressa è 4 volte più piccola per asse.
+
+**(c) Il modello principale** (`diff_model_train.py`). Riceve gli embedding e il file accompagnatore. Le immagini vengono moltiplicate per il fattore di scala (1 / deviazione standard del primo batch, righe 186–188). Con probabilità 10% la modalità viene azzerata (righe 36–66). Il bersaglio per RFlow è `immagine − rumore`. Perdita L1, Adam, decadimento polinomiale, AMP. Un checkpoint per epoch, con il fattore di scala salvato dentro.
+
+**(d) Il ControlNet** (`train_controlnet.py`). Il modello principale è congelato (righe 317–318). Il ControlNet parte dai pesi del modello principale (riga 307) oppure da un file precedente (`existing_ckpt_filepath`). Perdita L1 sull'output del modello principale, con eventuale peso sulle etichette e perdita contrastiva (righe 454–481). AdamW con learning rate 1e-5 e decadimento polinomiale. **Nessuna validazione.** Salva `_current.pt` e `_best.pt`.
+
+### 9.5 Creare solo immagini, senza maschera
+
+`diff_model_infer.py` crea immagini senza ControlNet. Si parte dal rumore, il modello principale fa il denoising con la CFG sulla modalità (classe 0 come non condizionata), poi l'autoencoder decomprime con finestra fissa `[80, 80, 80]` e sovrapposizione 0.4. L'uscita è in formato intero a 16 bit.
+
+Il risultato **non ha una mappa**: non puoi controllare dove stanno le strutture.
+
+---
+
+## 10. Come si usa in pratica
+
+### 10.1 Preparazione
 
 ```bash
 pip install -r requirements.txt
 # PyTorch con CUDA: https://pytorch.org/get-started/locally/
 ```
 
-Requisiti: Python 3.11+, GPU con almeno 16 GB di VRAM (per inferenza con preset piccoli). Per 512×512×768 servono 40 GB in inferenza e 80 GB in training, come dice il paper.
+Serve Python 3.11 o superiore, e una scheda grafica NVIDIA con almeno 16 GB di memoria per le configurazioni piccole. Per i volumi 512×512×768 servono 40 GB per creare e 80 GB per addestrare, come dice il paper.
 
 ### 10.2 Scaricare i pesi
 
 ```bash
-# Solo pesi, per inferenza
 python -m scripts.download_model_data --version rflow-ct --root_dir "./" --model_only
 python -m scripts.download_model_data --version rflow-mr --root_dir "./" --model_only
 python -m scripts.download_model_data --version rflow-mr-brain --root_dir "./" --model_only
 ```
 
-I pesi finiscono in `./models/`. Senza `--model_only` scarica anche il database di maschere (la dimensione non l'ho verificata).
+`--model_only` scarica solo i pesi. I pesi finiscono nella cartella `models/`. Senza `--model_only` scarica anche l'archivio delle maschere: la dimensione non l'ho verificata.
 
-### 10.3 Generare una coppia immagine+maschera (CT)
-
-```bash
-python -m scripts.inference \
-  -t ./configs/config_network_rflow.json \
-  -i ./configs/config_infer.json \
-  -e ./configs/environment_rflow-ct.json \
-  --random-seed 0 --version rflow-ct
-```
-
-### 10.4 Generare un'immagine da una tua maschera (il caso più vicino al tuo)
+### 10.3 Creare una coppia immagine + maschera (TC)
 
 ```bash
-python -m scripts.infer_image_from_mask \
-  --mask percorso/della/tua_maschera.nii.gz \
-  -t ./configs/config_network_rflow.json \
-  -e ./configs/environment_rflow-ct.json \
-  -i ./configs/config_infer.json
+python -m scripts.inference -t ./configs/config_network_rflow.json -i ./configs/config_infer.json -e ./configs/environment_rflow-ct.json --random-seed 0 --version rflow-ct
 ```
 
-Questo carica il modello CT. **Per il cervello il modello giusto è quello MR-Brain, e la pipeline di questo comando non è scritta per la MR.** Vedi [sezione 13](#13-cosa-significa-tutto-questo-per-il-tuo-progetto).
-
-### 10.5 Addestrare la UNet o il ControlNet
-
-I comandi nei documenti usano le configurazioni di diffusione con `config_maisi_diff_model_*` per il ControlNet. La documentazione (`docs/training.md:92`) lo indica, ma la skill riconosce che manca `controlnet_train` e che il comando fallirebbe. Per il ControlNet serve il file `config_maisi_controlnet_train_*.json`.
-
-Esempio di training ControlNet (dalla documentazione, da verificare):
+### 10.4 Creare un'immagine dalla tua maschera
 
 ```bash
-python -m scripts.train_controlnet \
-  -t ./configs/config_network_rflow.json \
-  -c ./configs/config_maisi_controlnet_train_rflow-ct.json \
-  -e ./configs/environment_maisi_controlnet_train_rflow-ct.json \
-  -g 1
+python -m scripts.infer_image_from_mask --mask percorso/della/tua_maschera.nii.gz -t ./configs/config_network_rflow.json -e ./configs/environment_rflow-ct.json -i ./configs/config_infer.json
 ```
 
-### 10.6 Lint
+Questo comando usa il modello TC. **Per il cervello serve un altro modello, e questo comando non è pensato per la risonanza.**
+
+### 10.5 Addestrare il ControlNet
+
+Esempio tratto dalla documentazione (da verificare):
+
+```bash
+python -m scripts.train_controlnet -t ./configs/config_network_rflow.json -c ./configs/config_maisi_controlnet_train_rflow-ct.json -e ./configs/environment_maisi_controlnet_train_rflow-ct.json -g 1
+```
+
+**Attenzione**: la documentazione in alcuni punti indica il file di configurazione sbagliato (quello della diffusione invece di quello del ControlNet). Controlla sempre che sia il file del ControlNet.
+
+### 10.6 Controllare lo stile del codice
 
 ```bash
 pre-commit run --all-files
 ```
 
-Non ci sono test automatici.
+Controlla lo stile con `ruff`. Non ci sono test che verificano che il programma funzioni.
 
 ---
 
-## 11. Bug, rischi e punti da verificare
+## 11. Problemi noti
 
-Ordinati per impatto probabile. "Verificato" significa confermato leggendo il codice; "non verificato" significa che serve eseguirlo.
+Ordinati per importanza. **"Verificato"** significa che l'ho letto nel codice. **"Da verificare"** significa che va provato sul tuo computer.
 
-1. **`inference.py:105` fallisce con valori `null` nell'ambiente** (verificato leggendo). `environment_rflow-mr.json` ha tre chiavi a `null`, quindi `scripts.inference` non può girare con quel file. `diff_model_infer` evita il problema controllando `isinstance(v, str)`.
+1. **Un file di ambiente fa crashare il programma.** `environment_rflow-mr.json` ha tre chiavi vuote (`null`), e `inference.py` alla riga 105 non le gestisce. (Verificato leggendo il codice.)
 
-2. **`--random-seed` senza `type=int`** (`inference.py:55-60`, verificato). Il valore è una stringa e viene passato a `set_determinism` e a `LDMSampler`. Non verificato se numpy o torch lo accettano. È il primo controllo da fare se l'avvio crasha.
+2. **Il seme casuale è una stringa.** `--random-seed` non è dichiarato come numero (`inference.py`, righe 55–60): il valore arriva come testo e viene passato a `set_determinism` e a `LDMSampler`. Non so se numpy o torch lo accettano. Se il programma non parte, questo è il primo sospetto. (Da verificare.)
 
-3. **`np.long` in `utils.py`** (verificato leggendo). Compare in circa dieci righe, tra cui 361, 382, 413, 590, 615–620, 631, 636, 659–660. `np.long` non è un attributo di NumPy moderno. `requirements.txt` permette `numpy>=1.24.0`. Non verificato se lancia errore. Se lo fa: fallirebbero il Path A (riga 590), la ricerca approssimata e `build_conditioning_tensors` (tramite `get_body_region_index_from_mask`, riga 413).
+3. **Un nome non più valido in NumPy.** `utils.py` usa `np.long` alle righe 361, 382, 413, 416, 418, 421, 590, 615–620, 631, 636, 659–660. Nelle versioni moderne di NumPy non esiste più. `requirements.txt` permette `numpy>=1.24.0`. Se viene davvero usato, il programma si blocca: fallirebbero il Percorso A (riga 590), la ricerca approssimata e `build_conditioning_tensors`. (Da verificare.)
 
-4. **CUDA hard-coded** (verificato). `augmentation.py` alle righe 104, 152, 208, 260, 314 usa `.cuda()`; `sample_mask.py:133` usa `autocast("cuda")`; `inference.py:172` usa `torch.device("cuda")`. Il Path B richiede una GPU in ogni caso.
+4. **La scheda NVIDIA è obbligatoria.** Il nome `cuda` è scritto direttamente in più punti: `augmentation.py` righe 104, 152, 208, 260, 314; `sample_mask.py` riga 133; `inference.py` riga 172. Il Percorso B richiede una GPU in ogni caso. (Verificato.)
 
-5. **Loader di validazione scartato nel training del ControlNet** (verificato, `train_controlnet.py:337`). Non c'è nessuna metrica di validazione, e i dati del fold di validazione non vengono mai usati.
+5. **Il ControlNet non valuta su dati nuovi.** Il caricatore di validazione viene buttato via (`train_controlnet.py`, riga 337). Non sai se il modello migliora davvero su casi che non ha mai visto. (Verificato.)
 
-6. **File JSON laterale mai prodotto** (verificato nei file letti). `diff_model_train.py:450` si aspetta `<embedding>.nii.gz.json`, ma `diff_model_create_training_data.py` scrive solo il NIfTI (`:190-192`). Non verificato se il notebook del training lo crea.
+6. **Manca un file accompagnatore.** `diff_model_train.py` riga 450 cerca `<embedding>.nii.gz.json`, ma `diff_model_create_training_data.py` scrive solo il NIfTI (righe 190–192). Non so se il notebook di addestramento lo crea. (Verificato nei file letti; da verificare nel notebook.)
 
-7. **Il controllo di qualità non fa rigenerare con un campione** (verificato, `sample.py:335`). Con `num_img=1` la coppia viene sempre salvata, anche se fallisce il controllo. La documentazione dice il contrario.
+7. **Il controllo di qualità non fa rigenerare con un solo campione.** `sample.py`, riga 335: la condizione per rigenerare non scatta quando `num_img = 1`, quindi la coppia viene salvata anche se non passa il controllo. La documentazione dice il contrario. (Verificato.)
 
-8. **Finestra dei tentativi per le etichette in Path A** (`sample.py:282-302`): cinque tentativi, poi procede con un avviso. Se l'organo richiesto manca, la coppia viene salvata comunque.
+8. **Il tentativo di trovare le strutture in Percorso A ha un limite.** Dopo cinque tentativi (`sample.py`, righe 282–302), il programma va avanti con un avviso. La coppia viene salvata anche se manca un organo richiesto. (Verificato.)
 
-9. **Percorsi di default verso file assenti** (`inference.py:31-42`, `diff_model_train.py:521-536`, `train_controlnet.py:541-556`, `diff_model_create_training_data.py:268-283`, `find_masks.py:61-62`). Funzionano solo se si passano i percorsi espliciti, come fa la documentazione.
+9. **Percorsi di default verso file che non esistono.** `inference.py` (righe 31–42), `diff_model_train.py` (righe 521–536), `train_controlnet.py` (righe 541–556), `diff_model_create_training_data.py` (righe 268–283), `find_masks.py` (righe 61–62). Funzionano solo se passi i percorsi giusti, come fa la documentazione. (Verificato.)
 
-10. **Chiave con segmento `configs/` in più** (`environment_ddpm-ct.json:10`, verificato). Non viene mai letta.
+10. **Alcune funzioni possono non finire mai.** L'augmentation per fegato, polmone, pancreas non ha un limite di tentativi (`augmentation.py`, righe 149, 205, 257). Se la maschera è difficile, il programma può sembrare bloccato. Il colon si ferma a 40 e BraTS a 1000. (Verificato.)
 
-11. **Incoerenza nei preset**. `24g_256x256x256` e `80g_512x512x512` impostano 1000 passi RFlow; gli altri 30. Intenzione non verificata.
+11. **Preset con un numero di passi diverso.** `24g_256x256x256` e `80g_512x512x512` usano 1000 passi, gli altri 30. Potrebbe essere un errore di copia. (Da verificare.)
 
-12. **Codice morto e duplicato**:
-    - `run_torchrun` (`diff_model_setting.py:98-139`) non è chiamato da nessuno.
+12. **Codice inutilizzato e doppioni.**
+    - `run_torchrun` (`diff_model_setting.py`, righe 98–139) non è mai chiamato.
     - `utils_plot.py` è usato solo dai notebook.
-    - `oran_list` contiene il valore 10 due volte (`utils.py:609`).
-    - `label_int_dict["lung"]` duplica 31 (`sample.py:186`).
-    - `mask_generation_scale_factor` nella configurazione non è usato (`config_network_rflow.json:139`).
-    - `utils.py:686-689` stampa su ogni chiamata.
+    - In `utils.py` riga 609, il valore 10 è ripetuto nella lista `oran_list`.
+    - In `sample.py` riga 186, `label_int_dict["lung"]` duplica il 31.
+    - `mask_generation_scale_factor` nella configurazione non è letto (`config_network_rflow.json`, riga 139).
+    - `utils.py` righe 686–689 stampa un messaggio a ogni chiamata.
 
-13. **Commento obsoleto** (`diff_model_create_training_data.py:253-256`): dice che `modality` può non essere definito; invece è definito a riga 245.
+13. **Un commento sbagliato.** In `diff_model_create_training_data.py` (righe 253–256) un commento dice che `modality` può non essere definita. In realtà è definita a riga 245.
 
-14. **Domanda aperta sul dizionario** (`RIASSUNTO_PROGETTO.md:46`). Il codice chiarisce che si usa `label_dict.json`. Vedi [sezione 8](#8-dizionari-delle-etichette).
+14. **Il dizionario per il tuo tumore.** Non è chiaro quale dizionario usare per il tumore cerebrale. Vedi [sezione 13](#13-che-cosa-significa-per-il-tuo-progetto).
 
-15. **Heuristic di `add_body_envelope`** (`utils.py:428-565`): soglia −800 HU, `table_frac_thresh=0.05`, device di default `cuda:0`. Documentate solo nel docstring.
+15. **Valori fissi nella funzione `add_body_envelope`** (`utils.py`, righe 428–565): soglia −800 HU per l'aria, `table_frac_thresh = 0.05` per il lettino, device di default `cuda:0`. Sono spiegati solo nel commento della funzione.
 
-16. **Semantica non chiara**: il significato del valore di `controllable_anatomy_size`; il tumore epatico (slot 11) ha un recall basso secondo le skill.
+16. **Il significato della dimensione non è chiaro.** Non è definito nel progetto che cosa rappresenti il numero di `controllable_anatomy_size`. Le skill avvertono che il tumore del fegato (slot 11) è riconosciuto male, cioè con poca sensibilità.
 
-17. **Mappatura dei canali della maschera** (`config_network_rflow.json:95`): 125 canali e indici di rimappatura 0–124 combaciano, ma la corrispondenza completa canale-indice non è stata confermata oltre il file di rimappatura.
+17. **La corrispondenza canali-etichette della maschera.** I 125 canali (`config_network_rflow.json`, riga 95) e le rimappature 0–124 combaciano, ma la corrispondenza completa canale per canale non l'ho confermata oltre il file di rimappatura.
 
 ---
 
-## 12. Documentazione e codice non coincidono
+## 12. Dove la documentazione non corrisponde al codice
 
-Questa sezione elenca dove la documentazione dice una cosa e il codice ne fa un'altra. Non è un giudizio: è un elenco di cose da controllare prima di fidarsi.
+Non è un giudizio: è un elenco di cose da controllare prima di fidarsi.
 
-| Dove | Affermazione | Realtà nel codice |
+| Dove | Cosa dice | Cosa fa il codice |
 |---|---|---|
-| `docs/inference.md:200`, `:219`; `skills/infer_image-only.md:72`, `:176-177` | CFG della MR image-only è 10 | `rflow-mr` = 15, `rflow-mr-brain` = 2 |
-| `skills/infer_image-from-mask.md:66` | La CLI scrive `sample_<ts>_image` e `sample_<ts>_label` | Scrive solo `<stem_maschera>_<ts>_image.nii.gz` (`infer_image_from_mask.py:503-520`) |
-| `skills/infer_mask-only_via_real_aug.md:82` | Le augmentation ripetono fino a 1000 volte | Solo il percorso BraTS ha il limite di 1000 (`augmentation.py:403`); fegato, polmone, pancreas, osso sono `while True` (`:149`, `:205`, `:257`); il colon si ferma a 40 (`:309-319`) |
-| `skills/infer_mask-only_via_real_aug.md:31-32` | Il fallback ignora il filtro di anatomia | Passa `anatomy_list` a `find_masks` (`sample.py:621-629`) e scarta i candidati dopo il ricampionamento (`sample.py:573-579`, `:685-691`) |
-| `docs/inference.md:210` | Il controllo di qualità fallito rigenera, fino a 2 tentativi | Con `num_img=1` il primo tentativo viene sempre salvato (`sample.py:335-341`); `max_try_time` regola solo il numero di candidati |
-| `skills/train_controlnet_image-from-mask.md:68` | `num_class_embeds=128` nelle reti rflow/ddpm distribuite | Assente nella rete DDPM (`config_network_ddpm.json`) |
-| `docs/training.md:92` | Comando del ControlNet su GPU singola con configurazioni di diffusione | Manca `controlnet_train`; fallirebbe in `train_controlnet.py:260` (la skill lo riconosce a riga 147) |
-| `docs/performance.md:9` | Finestra `>=[64,64,32]` per 16g 256×256×128 | Configurazione: `[96,96,96]` |
-| `skills/download-models.md` | Flag `--token` e `--overwrite` | Non presenti in `download_model_data.py:191-206` |
-| `scripts/sample.py:19-20`, `scripts/infer_image_from_mask.py:40` | Rimandano a `skills/mask-generation.md` e `skills/image-from-mask.md` | I file reali sono `infer_mask-only*.md` e `infer_image-from-mask.md` |
+| `docs/inference.md` (righe 200, 219) e `skills/infer_image-only.md` (righe 72, 176–177) | Il CFG della risonanza è 10 | È 15 per `rflow-mr` e 2 per `rflow-mr-brain` |
+| `skills/infer_image-from-mask.md` (riga 66) | La CLI scrive due file: immagine ed etichetta | Scrive solo l'immagine (`infer_image_from_mask.py`, righe 503–520) |
+| `skills/infer_mask-only_via_real_aug.md` (riga 82) | Le augmentation si fermano dopo 1000 tentativi | Solo BraTS ha questo limite; fegato, polmone, pancreas, osso non si fermano mai; il colon si ferma a 40 |
+| `skills/infer_mask-only_via_real_aug.md` (righe 31–32) | Il ripiego ignora il filtro sulle strutture | Lo rispetta (`sample.py`, righe 621–629 e 573–579) |
+| `docs/inference.md` (riga 210) | Il controllo di qualità fallito riprova fino a 2 volte | Con un solo campione salva comunque (`sample.py`, righe 335–341) |
+| `skills/train_controlnet_image-from-mask.md` (riga 68) | La rete DDPM ha `num_class_embeds = 128` | Non ce l'ha (`config_network_ddpm.json`) |
+| `docs/training.md` (riga 92) | Comando del ControlNet con il file di configurazione sbagliato | Il comando fallirebbe in `train_controlnet.py`, riga 260 |
+| `docs/performance.md` (riga 9) | Finestra `>= [64, 64, 32]` per la configurazione 16g 256×256×128 | Nella configurazione è `[96, 96, 96]` |
+| `skills/download-models.md` | Opzioni `--token` e `--overwrite` | Non esistono (`download_model_data.py`, righe 191–206) |
+| `scripts/sample.py` (righe 19–20) e `scripts/infer_image_from_mask.py` (riga 40) | Rimandano ai file `skills/mask-generation.md` e `skills/image-from-mask.md` | I file reali si chiamano `infer_mask-only*.md` e `infer_image-from-mask.md` |
 
-Nota: tra le skill, quelle che descrivono la pipeline CT (`infer_mask-only_*`, `infer_mask-image-paired`, `download-models`) sono largamente corrette. Le discrepanze sono soprattutto su dettagli operativi.
+Nota: le skill sulla TC (`infer_mask-only_*`, `infer_mask-image-paired`, `download-models`) sono in gran parte corrette. Le discrepanze riguardano soprattutto i dettagli operativi.
 
 ---
 
-## 13. Cosa significa tutto questo per il tuo progetto
+## 13. Che cosa significa per il tuo progetto
 
-Il tuo obiettivo, dal `RIASSUNTO_PROGETTO.md`: fare fine-tuning per generare maschere con tumore cerebrale, partendo dai tuoi 30 casi, e in seguito un ControlNet per generare MRI dalla maschera.
+Il tuo obiettivo, dal `RIASSUNTO_PROGETTO.md`: creare mappe con tumore cerebrale partendo dai tuoi 30 casi, e in seguito creare risonanze dalla mappa con un ControlNet.
 
-### 13.1 Cosa il codice fa già per il cervello
+### 13.1 Quello che c'è già
 
-- **Immagine da maschera per MRI cerebrale**: il modello `rflow-mr-brain` esiste, con UNet e autoencoder scaricabili. Sequenze: T1, T2, FLAIR, SWI.
-- **Dimensioni e spaziatura**: `environment_maisi_diff_model_rflow-mr-brain.json` e `config_maisi_diff_model_rflow-mr-brain.json` sono coerenti con il download.
-- **Modalità**: MR skull-stripped usa i codici 29–33 (T1 29, T2 30, FLAIR 31), MR completa 9–17 (T1 9, T2 10, FLAIR 11).
+- Un modello per la **risonanza del cervello**: `rflow-mr-brain`, con le sequenze T1, T2, FLAIR e SWI.
+- Impostazioni di dimensione e spaziatura coerenti con il download (`environment_maisi_diff_model_rflow-mr-brain.json` e `config_maisi_diff_model_rflow-mr-brain.json`).
+- Numeri già pronti per le sequenze: T1 = 9 (o 29 senza cranio), T2 = 10 (o 30), FLAIR = 11 (o 31).
+- Un'augmentation pensata per i tumori cerebrali (`augmentation_tumor_only`, con le etichette BraTS 401–403).
 
-### 13.2 Cosa il codice NON fa per il cervello (per ora)
+### 13.2 Quello che manca
 
-1. **Nessun ControlNet MRI scaricabile** per il cervello. Il download di `rflow-mr-brain` prende solo autoencoder e UNet. Il blog dice che il modulo ControlNet esiste nel modello brain, ma gli script di download non lo prendono. Da verificare su Hugging Face.
-2. **Nessun modello di maschere per il cervello.** Il modello di maschere `rflow-mask` è addestrato su corpo CT. Per generare maschere cerebrali con tumore serve addestrarlo o usare un'altra strada.
-3. **Nessuna regola di augmentation per il tumore cerebrale nei percorsi CT.** L'augmentation BraTS (`augmentation_tumor_only`) esiste ed è l'unica pensata per il cervello, ma usa etichette 401–403 (sottoregioni BraTS) che non sono nel `label_dict.json` del modello.
-4. **Il tumore cerebrale non è una classe del modello.** Nel `label_dict.json` il cervello è 22 e il tumore non c'è. Nel `label_dict_ctmr.json` esiste `brain tumor` 176, ma **nessun codice lo carica**.
+1. **Il ControlNet per il cervello** non risulta scaricabile con il codice attuale. Va verificato su Hugging Face.
+2. **Un modello per creare mappe cerebrali con tumore.** Il modello delle maschere esistente è addestrato sul corpo intero in TC, non sul cervello. Per le mappe cerebrali serve addestrarlo, oppure scegliere un'altra strada.
+3. **Un'etichetta per il tumore cerebrale.** Nel dizionario principale c'è il cervello (numero 22), ma non il tumore. Il numero 176 del file alternativo non è letto dal codice.
 
-### 13.3 La questione delle etichette, aggiornata
+### 13.3 La scelta dell'etichetta del tumore
 
-Il `RIASSUNTO_PROGETTO.md` decide di mappare il tumore sulla classe 176 `brain tumor` di `label_dict_ctmr.json`. Il codice dice qualcosa di diverso:
+Il `RIASSUNTO_PROGETTO.md` aveva deciso di usare il numero 176. Il codice dice che non si può fare, perché il modello legge solo il dizionario a 132 numeri. Le strade sono due:
 
-- il modello di maschere usa `label_dict_124_to_132.json`, quindi il vocabolario di riferimento è `label_dict.json` a 132 classi;
-- `label_dict_ctmr.json` non viene letto da nessun file Python.
+- **Usare un numero libero** (tra 133 e 199) per una nuova struttura "tumore cerebrale". Richiede di aggiungerla alla tabella di traduzione `label_dict_124_to_132.json` e di riaddestrare il modello delle maschere, perché il numero di canali in uscita cambia. È la strada corretta ma più lunga.
+- **Riusare una struttura vicina**, per esempio la lesione ossea (128). È più semplice, ma semanticamente sbagliato.
 
-Quindi la classe 176 non è utilizzabile così com'è. Serve una scelta esplicita:
-- **Opzione A**: usare uno slot libero (133–199) di `label_dict.json` come nuova classe "brain tumor". Questo non basta: la rete delle maschere produce 125 canali, quindi la nuova classe va inserita anche nella mappatura `label_dict_124_to_132.json` e il modello delle maschere va riaddestrato con quella classe.
-- **Opzione B**: riusare la classe esistente più vicina (per esempio la lesione ossea 128, che però è semanticamente sbagliata).
-
-Questa è una decisione tua, da documentare: cambia la struttura dei dati e il fine-tuning.
+È una tua decisione. Va scritta da qualche parte, perché cambia il lavoro di addestramento.
 
 ### 13.4 Licenze
 
-- `NV-Generate-MR-Brain` e `rflow-mr-brain`: NVIDIA Open Model License, commerciale.
-- `rflow-mr` (corpo, altre regioni): **solo ricerca**.
-- Dataset MR-RATE: CC-BY-NC per la ricerca.
+- `NV-Generate-MR-Brain` e `rflow-mr-brain`: uso libero, anche commerciale.
+- `rflow-mr`: solo ricerca.
+- Dati MR-RATE: solo ricerca, licenza CC-BY-NC.
 
-Se il progetto è di ricerca, sei coperto. Se puoi avere un uso commerciale, il modello cerebrale è utilizzabile ma il dataset MR-RATE no, e i dati di training del tuo fine-tuning sono i tuoi, quindi vanno valutati separatamente.
+Se il progetto è di ricerca, sei a posto. Se in futuro vuoi usarlo commercialmente, il modello cerebrale sì, ma i dati MR-RATE no.
 
-### 13.5 Il percorso più realistico
+### 13.5 Un percorso ragionevole
 
-In base a quanto letto, un percorso ragionevole per il tuo obiettivo:
+1. **Verificare il modello del cervello**: scaricare `rflow-mr-brain`, controllare che i file siano quelli attesi, cercare su Hugging Face se esiste un ControlNet per il cervello.
+2. **Decidere l'etichetta del tumore** (vedi 13.3) e scrivere la tabella che collega le 183 strutture dei tuoi dati alle strutture del modello. È il punto più rischioso di tutto il progetto.
+3. **Preparare i dati**: maschere in formato NIfTI, con le etichette come numeri interi, nella spaziatura giusta. Poi creare gli embedding con `diff_model_create_training_data.py`, e scrivere a mano il file accompagnatore JSON richiesto da `diff_model_train.py`.
+4. **Provare la pipeline su un solo caso** prima di addestrare: la creazione di un'immagine dalla tua maschera deve funzionare.
+5. **Addestrare** con i 24 casi di training e controllare con i 6 di validazione. Il ControlNet attuale non valuta su dati nuovi, quindi la valutazione va scritta.
+6. **Valutare**: Dice sul tumore sui casi di validazione, e controllare che le maschere generate non siano copie dei tuoi casi (distanza dai casi di training). Il FID da solo non basta.
 
-1. **Verificare l'ambiente**: scaricare `rflow-mr-brain` e controllare che i file siano quelli attesi. Verificare se su Hugging Face esiste un ControlNet per il cervello.
-2. **Definire le etichette**: decidere la classe per il tumore cerebrale (opzione A o B della sezione 13.3) e scrivere la tabella di mappatura delle 183 etichette verso le classi del modello. Questo è il rischio più alto del progetto.
-3. **Preparare i dati**: convertire le maschere in NIfTI con etichette intere, con la spaziatura e le dimensioni richieste. Creare gli embedding con `diff_model_create_training_data.py`, **e creare a mano il file JSON laterale** che `diff_model_train.py` si aspetta.
-4. **Testare la pipeline sulla MR** con un caso solo, prima di fare il fine-tuning: l'immagine da maschera deve funzionare su un tuo caso.
-5. **Fine-tuning** della UNet per le maschere (o del ControlNet), con i 24 casi di training e i 6 di validazione. Attenzione: `train_controlnet.py` **non valuta** su validazione, quindi la validazione va scritta.
-6. **Valutazione**: come dice il tuo piano, Dice sul tumore sui casi di validazione, distanza tra maschere generate e di training per evitare copie, volume medio per etichetta. Il paper usa FID e Dice; il FID non basta per la clinica.
+### 13.6 Due lezioni dal paper per il tuo caso
 
-### 13.6 Cosa tenere a mente dal paper per il tuo caso
-
-- Il paper dimostra che la **perdita contrastiva** migliora la presenza dei tumori piccoli e a basso contrasto. Il tuo tumore cerebrale è un caso simile. Il codice la implementa (`train_controlnet.py`, `compute_region_contrasive_loss`), ma va attivata nella configurazione.
-- Il paper mostra che i **tumori con rectified flow sono meno allineati** alla maschera rispetto al DDPM. Vale la pena confrontare anche la versione DDPM (`ddpm-ct`) per il tuo caso, anche se non esiste un DDPM per il cervello.
-- Il paper addestra su circa 107.000 volumi CT. Con 30 casi cerebrali la situazione è molto diversa, e il rischio principale è la **memorizzazione**: il modello riproduce i tuoi casi invece di generarne di nuovi. Il controllo di distanza dal training serve proprio a questo.
+- La **perdita contrastiva per regione** aiuta a far comparire tumori piccoli e poco contrastati, come il tuo. Il codice la implementa, ma va attivata nella configurazione.
+- Con **30 casi** il rischio principale è che il modello **copi** i tuoi casi invece di crearne di nuovi. Il paper usa circa 107.000 volumi, quindi la situazione è molto diversa. Il controllo di distanza dai casi di training serve proprio a questo.
 
 ---
 
 ## 14. Glossario
 
-- **Autoencoder variazionale (VAE)**: rete che comprime un volume in un latente piccolo e lo ricostruisce.
-- **CFG (classifier-free guidance)**: combinazione di predizione condizionata e non condizionata per rafforzare la condizione.
-- **ControlNet**: rete ausiliaria che legge la condizione e guida una rete congelata.
-- **Dice**: sovrapposizione tra due maschere, da 0 a 1.
-- **DDPM**: modello di diffusione con processo di rumore stocastico, tipicamente 1000 passi.
-- **FID**: distanza tra distribuzioni di immagini, più bassa è meglio.
-- **FOV**: campo di vista fisico = voxel × spaziatura.
-- **HU**: unità Hounsfield, la scala delle intensità CT.
-- **LDM**: modello di diffusione nello spazio latente.
-- **NIfTI**: formato dei volumi medici con header.
-- **One-hot**: rappresentazione di una categoria come vettore con un solo 1.
-- **Path A**: maschera generata da zero con diffusione.
-- **Path B**: maschera reale dal database con augmentation.
-- **RFlow (rectified flow)**: modello con traiettorie quasi dritte, meno passi di inferenza.
-- **Scale factor**: fattore che porta i latenti vicino alla varianza unitaria, calcolato come 1/std.
-- **Spaziatura (spacing)**: dimensione fisica di un voxel, in mm.
-- **Sliding window**: elaborazione di un volume grande a blocchi sovrapposti.
-- **VISTA3D**: modello di segmentazione usato per creare le pseudo-etichette del ControlNet.
+- **Autoencoder (VAE)**: comprime un'immagine in una versione piccola e la ricostruisce.
+- **AdaGN**: un modo di regolare un blocco del modello con due numeri (scala e spostamento) calcolati dalla condizione.
+- **Augmentation**: variazione artificiale dei dati (ruotare, deformare, spostare) per averne di più.
+- **Batch**: quanti esempi vengono elaborati insieme.
+- **ControlNet**: il componente che legge la maschera e guida il modello principale.
+- **CFG (classifier-free guidance)**: combina la predizione con e senza condizione, per far seguire di più la condizione.
+- **Dice**: quanto due maschere coincidono, da 0 a 1.
+- **Diffusione**: creare un'immagine partendo dal rumore, passo dopo passo.
+- **Embedding**: una versione compressa dell'immagine, pronta per l'addestramento.
+- **Epoch**: un giro completo sui dati di addestramento.
+- **FID**: quanto le immagini sembrano reali, più basso è meglio.
+- **FOV (campo di vista)**: la dimensione reale del volume.
+- **Hounsfield (HU)**: la scala dei valori della TC.
+- **Learning rate**: quanto il modello cambia a ogni correzione.
+- **Maschera**: la mappa delle strutture.
+- **Modalità**: il tipo di scansione (TC, T1, T2, FLAIR…), codificato con un numero.
+- **NIfTI**: il formato standard dei volumi medici.
+- **Percorso A / B**: mappa creata da zero (A) oppure presa dall'archivio (B).
+- **Rectified flow (RFlow)**: variante della diffusione con percorsi più dritti, quindi meno passi.
+- **Scale factor (fattore di scala)**: un numero che porta i valori compressi a una scala comoda per il modello.
+- **Scheduler**: il programma che decide il rumore passo per passo.
+- **Seme casuale (seed)**: il numero che fissa il caso, per riprodurre un risultato.
+- **Spaziatura (spacing)**: quanti millimetri misura un voxel.
+- **Spazio latente**: la versione compressa dell'immagine.
+- **Tensore**: una griglia di numeri con più dimensioni.
+- **Voxel**: un cubetto del volume, cioè un pixel 3D.
